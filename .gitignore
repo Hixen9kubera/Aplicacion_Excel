@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Archivos JSON generados (credenciales de Google Drive, etc.)
+*.json
+
+# Archivos generados automáticamente
+odoo_cache.pkl
+chroma_db/
+imagenes_temp/
+*.csv
+
+# Jupyter
+*.ipynb
+
+# Archivos Excel de datos / packing lists
+*.xlsx
+*.xls
+# Excepción: el template base de Ferraforme SÍ debe estar en el repo
+!FORMULA FERRAFORME PRODUCTOS .xlsx
+
+# Carpeta de pruebas y scripts temporales
+pruebas/
+
+# Credenciales (nunca subir al repo)
+.env

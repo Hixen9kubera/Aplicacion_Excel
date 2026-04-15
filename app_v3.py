@@ -3884,182 +3884,133 @@ if st.session_state.esperando_duplicados:
         # PASO 1 — Auto-resolver exactos; pedir decisión solo para el resto
         # ════════════════════════════════════════════════════════════════════════
         if dup_paso == 1:
-            grupos_auto   = [g for g in grupos_dup if g["tipo"] == "exacto"]
-            grupos_manual = [g for g in grupos_dup if g["tipo"] != "exacto"]
+            # Todos los grupos son editables — los "exacto" tienen Mismo producto pre-seleccionado
+            todos_grupos = grupos_dup
 
-            # ── Resumen de grupos auto-resueltos ──────────────────────────────
-            if grupos_auto:
-                with st.expander(
-                    f"✅ {len(grupos_auto)} producto(s) detectados como duplicados y fusionados automáticamente",
-                    expanded=True,
-                ):
-                    st.caption("Tienen el mismo nombre (y/o imagen e imagen idéntica). Sus cantidades fueron sumadas en una sola fila.")
-                    for grupo in grupos_auto:
-                        prods_a = grupo["productos"]
-                        p0_a    = prods_a[0]
-                        filas_a = [str(p.get("fila_excel_0idx", grupo["indices"][ci]) + 1) for ci, p in enumerate(prods_a)]
+            st.subheader(f"🔍 {len(todos_grupos)} grupo(s) detectados — revisa y corrige si es necesario")
+            st.caption("Puedes cambiar la decisión de cualquier grupo, incluso los que detectamos con alta confianza.")
 
-                        # Razón de la fusión
-                        tiene_img = any(
-                            imagenes_dup.get(p.get("fila_excel_0idx")) for p in prods_a
+            # Encabezados
+            _hA, _hB, _hC, _hD = st.columns([3, 4, 3, 3])
+            with _hA: st.markdown("**Imágenes**")
+            with _hB: st.markdown("**Producto / Filas**")
+            with _hC: st.markdown("**Detectado como**")
+            with _hD: st.markdown("**Tu decisión**")
+            st.divider()
+
+            for grupo in todos_grupos:
+                gid    = str(grupo["id"])
+                prods  = grupo["productos"]
+                p0     = prods[0]
+                tipo_g = grupo["tipo"]
+                n_p    = len(prods)
+                filas  = [str(p.get("fila_excel_0idx", grupo["indices"][ci]) + 1)
+                          for ci, p in enumerate(prods)]
+                diffs  = grupo.get("diffs", {})
+
+                tipo_badge = {
+                    "exacto":          "✅ Mismo producto (alta confianza)",
+                    "probable":        "❓ Posible mismo producto",
+                    "similar":         "🈁 Posible variante (nombre chino similar)",
+                    "nombre_similar":  "🔤 Nombres parecidos",
+                    "variante_imagen": "🖼️ Imágenes similares",
+                }.get(tipo_g, tipo_g)
+
+                default_idx = {
+                    "exacto":          0,  # Mismo producto
+                    "probable":        0,  # Mismo producto
+                    "similar":         1,  # Variante
+                    "variante_imagen": 1,  # Variante
+                    "nombre_similar":  2,  # Productos diferentes
+                }.get(tipo_g, 2)
+
+                col_imgs, col_info, col_tipo, col_dec = st.columns([3, 4, 3, 3])
+
+                # ── Thumbnails ──────────────────────────────────────────────────
+                with col_imgs:
+                    n_thumb = min(n_p, 5)
+                    tcols   = st.columns(n_thumb)
+                    for ci in range(n_thumb):
+                        with tcols[ci]:
+                            fila_0 = prods[ci].get("fila_excel_0idx")
+                            img_t  = imagenes_dup.get(fila_0) if fila_0 is not None else None
+                            if img_t:
+                                st.image(img_t["data"], width=65)
+                            else:
+                                st.caption("—")
+                    if n_p > 5:
+                        st.caption(f"+{n_p - 5} más")
+
+                # ── Info ────────────────────────────────────────────────────────
+                with col_info:
+                    st.markdown(f"**{p0.get('nombre', '—')}**")
+                    _cn_orig = p0.get("nombre_chino_orig", "")
+                    if _cn_orig and _tiene_chino(_cn_orig):
+                        st.caption(f"🈁 {_cn_orig}")
+                    st.caption(f"Filas: {', '.join(filas)}")
+                    if diffs:
+                        diff_parts = []
+                        for campo, vals in list(diffs.items())[:3]:
+                            lbl = _LABELS_DIFF.get(campo, campo)
+                            diff_parts.append(f"{lbl}: {' / '.join(str(v) for v in vals)}")
+                        st.caption("↕ " + " · ".join(diff_parts))
+
+                # ── Tipo detectado ───────────────────────────────────────────────
+                with col_tipo:
+                    st.caption(tipo_badge)
+
+                # ── Decisión ────────────────────────────────────────────────────
+                with col_dec:
+                    dec = st.selectbox(
+                        "Decisión",
+                        ["Mismo producto", "Variante", "Productos diferentes"],
+                        index=default_idx,
+                        key=f"dup1_{gid}",
+                        label_visibility="collapsed",
+                    )
+
+                # ── Sub-grupos ───────────────────────────────────────────────────
+                # Mostrar siempre que haya más de 1 producto y la decisión no sea "diferentes"
+                if dec != "Productos diferentes" and n_p > 1:
+                    with st.expander(
+                        f"✂️ Separar en sub-grupos ({n_p} productos) — haz clic si alguno no pertenece aquí",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "Mismo número → van juntos en el mismo SKU base  ·  "
+                            "Número distinto → se tratan como grupos separados  ·  "
+                            "Independiente → SKU completamente propio"
                         )
-                        tiene_datos = _det_iguales(prods_a[0], prods_a[-1]) if len(prods_a) > 1 else False
-                        if tiene_img and tiene_datos:
-                            razon = "imagen idéntica + datos numéricos iguales"
-                        elif tiene_img:
-                            razon = "imagen idéntica + mismo nombre"
-                        elif tiene_datos:
-                            razon = "datos numéricos iguales + mismo nombre"
-                        else:
-                            razon = "mismo nombre"
+                        sub_cols = st.columns(min(n_p, 6))
+                        for ci, prod_s in enumerate(prods):
+                            with sub_cols[ci % 6]:
+                                fila_0s = prod_s.get("fila_excel_0idx")
+                                img_s   = imagenes_dup.get(fila_0s) if fila_0s is not None else None
+                                if img_s:
+                                    st.image(img_s["data"], width=90)
+                                _nom_s = prod_s.get("nombre", f"Prod {ci+1}")
+                                st.caption(f"F{filas[ci]}: {_nom_s[:25]}")
+                                st.selectbox(
+                                    "Sub-grupo",
+                                    ["1", "2", "3", "4", "5", "Independiente"],
+                                    index=0,
+                                    key=f"dup_sub_{gid}_{ci}",
+                                    label_visibility="collapsed",
+                                )
 
-                        col_info_a, col_imgs_a = st.columns([5, 4])
-                        with col_info_a:
-                            st.markdown(f"**{p0_a.get('nombre', '—')}**")
-                            st.caption(
-                                f"Filas: {', '.join(filas_a)}  \n"
-                                f"Razón: {razon}  \n"
-                                f"Precio: ${p0_a.get('precio_usd', '—')} · "
-                                f"Pzas/caja: {p0_a.get('piezas_x_caja', '—')}"
-                            )
-                        with col_imgs_a:
-                            _icols = st.columns(min(len(prods_a), 4))
-                            for ci, (prod_a, col_a) in enumerate(zip(prods_a[:4], _icols)):
-                                with col_a:
-                                    fila_0a = prod_a.get("fila_excel_0idx")
-                                    img_a   = imagenes_dup.get(fila_0a) if fila_0a is not None else None
-                                    if img_a:
-                                        st.image(img_a["data"], width=65)
-                                    st.caption(f"F{filas_a[ci]}")
-                        st.divider()
-
-            # ── Grupos que necesitan decisión del usuario — tabla compacta ────
-            if grupos_manual:
-                st.subheader(f"⚠️ {len(grupos_manual)} grupo(s) requieren tu revisión")
-                st.caption("Elige qué hacer con cada grupo. Expande ⚙️ para asignar sub-grupos si hay mezcla.")
-
-                # Encabezados de tabla
-                _hA, _hB, _hC, _hD = st.columns([3, 4, 3, 3])
-                with _hA: st.markdown("**Imágenes**")
-                with _hB: st.markdown("**Producto / Filas**")
-                with _hC: st.markdown("**Detectado**")
-                with _hD: st.markdown("**Decisión**")
                 st.divider()
 
-                for grupo in grupos_manual:
-                    gid    = str(grupo["id"])
-                    prods  = grupo["productos"]
-                    p0     = prods[0]
-                    tipo_g = grupo["tipo"]
-                    n_p    = len(prods)
-                    filas  = [str(p.get("fila_excel_0idx", grupo["indices"][ci]) + 1)
-                              for ci, p in enumerate(prods)]
-                    diffs  = grupo.get("diffs", {})
-
-                    tipo_badge = {
-                        "probable":        "❓ Nombre muy similar (posible mismo producto)",
-                        "similar":         "🈁 Nombre chino similar (posible variante)",
-                        "nombre_similar":  "🔤 Nombres parecidos",
-                        "variante_imagen": "🖼️ Imágenes similares",
-                    }.get(tipo_g, tipo_g)
-
-                    default_idx = {
-                        "probable":        0,  # Mismo producto (confianza alta por nombre chino)
-                        "similar":         1,  # Variante (mismo producto base, atributo distinto)
-                        "variante_imagen": 1,  # Variante
-                        "nombre_similar":  2,  # Productos diferentes
-                    }.get(tipo_g, 2)
-
-                    col_imgs, col_info, col_tipo, col_dec = st.columns([3, 4, 3, 3])
-
-                    # ── Thumbnails ──────────────────────────────────────────────
-                    with col_imgs:
-                        n_thumb = min(n_p, 5)
-                        tcols   = st.columns(n_thumb)
-                        for ci in range(n_thumb):
-                            with tcols[ci]:
-                                fila_0 = prods[ci].get("fila_excel_0idx")
-                                img_t  = imagenes_dup.get(fila_0) if fila_0 is not None else None
-                                if img_t:
-                                    st.image(img_t["data"], width=65)
-                                else:
-                                    st.caption("—")
-                        if n_p > 5:
-                            st.caption(f"+{n_p - 5} más")
-
-                    # ── Info ────────────────────────────────────────────────────
-                    with col_info:
-                        st.markdown(f"**{p0.get('nombre', '—')}**")
-                        # Mostrar nombre chino si existe y difiere del traducido
-                        _cn_orig = p0.get("nombre_chino_orig", "")
-                        if _cn_orig and _tiene_chino(_cn_orig):
-                            st.caption(f"🈁 {_cn_orig}")
-                        st.caption(f"Filas: {', '.join(filas)}")
-                        if diffs:
-                            diff_parts = []
-                            for campo, vals in list(diffs.items())[:3]:
-                                lbl = _LABELS_DIFF.get(campo, campo)
-                                diff_parts.append(f"{lbl}: {' / '.join(str(v) for v in vals)}")
-                            st.caption("↕ " + " · ".join(diff_parts))
-
-                    # ── Tipo detectado ──────────────────────────────────────────
-                    with col_tipo:
-                        st.caption(tipo_badge)
-
-                    # ── Decisión ────────────────────────────────────────────────
-                    with col_dec:
-                        dec = st.selectbox(
-                            "Decisión",
-                            ["Mismo producto", "Variante", "Productos diferentes"],
-                            index=default_idx,
-                            key=f"dup1_{gid}",
-                            label_visibility="collapsed",
-                        )
-
-                    # ── Sub-grupos (expandible) ─────────────────────────────────
-                    if dec != "Productos diferentes":
-                        with st.expander(f"⚙️ Sub-grupos ({n_p} productos)", expanded=False):
-                            st.caption(
-                                "Mismo número = van juntos · Número distinto = grupos separados · "
-                                "Independiente = SKU propio"
-                            )
-                            sub_cols = st.columns(min(n_p, 6))
-                            for ci, prod_s in enumerate(prods):
-                                with sub_cols[ci % 6]:
-                                    fila_0s = prod_s.get("fila_excel_0idx")
-                                    img_s   = imagenes_dup.get(fila_0s) if fila_0s is not None else None
-                                    if img_s:
-                                        st.image(img_s["data"], width=90)
-                                    st.caption(f"Fila {filas[ci]}")
-                                    st.selectbox(
-                                        "Sub-grupo",
-                                        ["1", "2", "3", "4", "Independiente"],
-                                        index=0,
-                                        key=f"dup_sub_{gid}_{ci}",
-                                        label_visibility="collapsed",
-                                    )
-
-                    st.divider()
-
             # ── Botón de confirmación ──────────────────────────────────────────
-            btn_label = "✅ Confirmar — generar SKUs →" if grupos_manual else "✅ Continuar — generar SKUs →"
-            if st.button(btn_label, type="primary", width="stretch"):
+            if st.button("✅ Confirmar — generar SKUs →", type="primary", width="stretch"):
                 respuestas_paso1: dict = {}
-                # Auto-resolver grupos exactos como "mismo producto"
-                for g in grupos_auto:
-                    respuestas_paso1[str(g["id"])] = {
-                        "tipo": "mismo",
-                        "sel":  list(range(len(g["productos"]))),
-                    }
-                # Recoger decisiones manuales
-                for g in grupos_manual:
+                # Leer decisión de TODOS los grupos (incluyendo los antes "auto")
+                for g in todos_grupos:
                     gid_b   = str(g["id"])
-                    dec_val = st.session_state.get(f"dup1_{gid_b}", "")
+                    dec_val = st.session_state.get(f"dup1_{gid_b}", "Mismo producto")
                     if "Productos diferentes" in dec_val:
                         respuestas_paso1[gid_b] = "diferente"
                     else:
                         tipo = "mismo" if dec_val == "Mismo producto" else "variantes"
-                        # Agrupar productos por número de sub-grupo
                         sub_map: dict[str, list[int]] = {}
                         for ci in range(len(g["productos"])):
                             sg = st.session_state.get(f"dup_sub_{gid_b}_{ci}", "1")
@@ -4067,8 +4018,7 @@ if st.session_state.esperando_duplicados:
                                 sub_map.setdefault(sg, []).append(ci)
                         subgrupos = list(sub_map.values())
                         if len(subgrupos) <= 1:
-                            # Un solo grupo → formato simple para backward compat
-                            respuestas_paso1[gid_b] = {"tipo": tipo, "sel": subgrupos[0] if subgrupos else []}
+                            respuestas_paso1[gid_b] = {"tipo": tipo, "sel": subgrupos[0] if subgrupos else list(range(len(g["productos"])))}
                         else:
                             respuestas_paso1[gid_b] = {"tipo": tipo, "subgrupos": subgrupos}
                 st.session_state.dup_respuestas = respuestas_paso1
@@ -4859,15 +4809,17 @@ def _agregar_productos_a_excel_ferraforme(excel_bytes: bytes,
     wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
     ws = wb.active
 
-    # ── 2. Encontrar la última fila con datos (scan desde abajo) ─────────────
-    #    Escanear de abajo hacia arriba es lo más seguro: no depende de que
-    #    max_row sea exacto, y para inmediatamente al encontrar la primera fila
-    #    con contenido real en col 1 (nombre) o col 2 (sku).
+    # ── 2. Encontrar la última fila con datos (scan de arriba hacia abajo) ──────
+    #    max_row no es confiable cuando el Excel viene del template (reporta 2075
+    #    por celdas fantasma aunque los datos reales terminen mucho antes).
+    #    Scan top-down: avanzar fila a fila y parar en la primera fila donde
+    #    tanto col 1 (nombre) como col 2 (sku) estén vacías.
     _last_data_row = 2  # mínimo: fila de encabezados
-    for _r in range(max(ws.max_row, 3), 2, -1):
+    for _r in range(3, ws.max_row + 2):
         if ws.cell(_r, 1).value or ws.cell(_r, 2).value:
             _last_data_row = _r
-            break
+        else:
+            break  # primera fila vacía → aquí terminan los datos
 
     # Inferir contenedor de los existentes
     _contenedor_ref = ""
@@ -5053,22 +5005,31 @@ with tab_agregar:
             _solo_conflictos:   list[dict] = []
 
             for _i, _img_info in _solo_imgs_dict.items():
-                _nombre_manual = _img_info.get("nombre", "").strip() or f"Producto {_i + 1}"
-                _prod: dict = {"nombre": _nombre_manual, "fila_excel_0idx": -(_i + 1), "_manual": True}
+                _nombre_manual = _img_info.get("nombre", "").strip()
+                # Solo pasar nombre como contexto si el usuario lo escribió;
+                # si no, dejar que Vision lo genere libre desde la imagen.
+                _ctx = {"fila_excel_0idx": -(_i + 1), "_manual": True}
+                if _nombre_manual:
+                    _ctx["nombre"] = _nombre_manual
 
-                _datos   = analizar_imagen_claude(_img_info["data"], _img_info["ext"], contexto=_prod)
+                _datos   = analizar_imagen_claude(_img_info["data"], _img_info["ext"], contexto=_ctx)
                 _sub_cod = _datos.get("subcategoria_cod", "VAR")
                 _att_cod = _datos.get("atributo_cod", "GEN")
                 _sku_ini = generar_sku(_sub_cod, _att_cod)
 
-                _prod.update({
+                # El nombre final es: lo que Vision generó (titulo), o lo que escribió el usuario
+                _titulo_final = _datos.get("titulo") or _nombre_manual or f"Producto {_i + 1}"
+                _prod: dict = {
+                    "nombre":        _titulo_final,
+                    "titulo":        _titulo_final,
                     "categoria":     _datos.get("categoria", ""),
                     "subcategoria":  _datos.get("subcategoria", ""),
                     "atributo_desc": _datos.get("atributo_desc", ""),
                     "atributo":      _datos.get("atributo_desc", ""),
-                    "titulo":        _datos.get("titulo", _nombre_manual),
                     "descripcion":   _datos.get("descripcion", ""),
-                })
+                    "fila_excel_0idx": -(_i + 1),
+                    "_manual": True,
+                }
 
                 _conf_entry = None
                 if _solo_skus_odoo:
@@ -5169,9 +5130,11 @@ with tab_agregar:
                     f"SKU: `{_prod.get('sku', '—')}`"
                 )
                 if _prod.get("categoria"):
-                    st.caption(_prod["categoria"])
+                    st.caption(f"📂 {_prod['categoria']}")
                 if _prod.get("atributo_desc"):
-                    st.caption(_prod["atributo_desc"])
+                    st.caption(f"🏷️ {_prod['atributo_desc']}")
+                if _prod.get("descripcion"):
+                    st.caption(f"📝 {_prod['descripcion']}")
 
         # ── Resolución de conflictos ODOO ─────────────────────────────────────
         _solo_resoluciones: dict = {}

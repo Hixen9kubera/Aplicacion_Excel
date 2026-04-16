@@ -1387,7 +1387,6 @@ def aplicar_resolucion_duplicados(productos: list[dict], grupos: list[dict], res
 
 CACHE_PATH = Path(__file__).parent / "odoo_cache.pkl"
 CACHE_MAX_HORAS = 24  # horas antes de considerar el cache desactualizado
-CHROMA_PATH = str(Path(__file__).parent / "chroma_db")
 IMAGENES_TEMP_PATH = Path(__file__).parent / "imagenes_temp"
 
 
@@ -1457,85 +1456,125 @@ def info_cache_odoo() -> str | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RAG — ChromaDB + sentence-transformers
+# Supabase — cache persistente de productos ODOO
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_chroma_collection():
-    """Obtiene (o crea) la colección ChromaDB persistente de productos ODOO."""
-    import chromadb
-    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-    ef = SentenceTransformerEmbeddingFunction(
-        model_name="paraphrase-multilingual-MiniLM-L12-v2"
-    )
-    client     = chromadb.PersistentClient(path=CHROMA_PATH)
-    collection = client.get_or_create_collection(
-        name="odoo_productos",
-        embedding_function=ef,
-        metadata={"hnsw:space": "cosine"},
-    )
-    return collection
-
-
-def indexar_productos_chroma(productos: list[dict]) -> int:
-    """
-    Indexa productos ODOO en ChromaDB para búsqueda semántica.
-    Usa nombre + descripción como texto del documento.
-    Devuelve número de productos indexados.
-    """
-    if not productos:
-        return 0
+def _supabase_client():
+    """Devuelve cliente Supabase o None si no está configurado."""
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_KEY", "")
+    if not url or not key:
+        return None
     try:
-        collection = _get_chroma_collection()
-        ids, docs, metas = [], [], []
-        for p in productos:
-            sku  = p.get("default_code", "")
-            name = p.get("name", "")
-            desc = p.get("description_sale") or ""
-            if not sku or not name:
-                continue
-            ids.append(sku)
-            docs.append(f"{name} {desc}".strip())
-            metas.append({"sku": sku, "nombre": name})
-        if not ids:
-            return 0
-        # Upsert en batches de 100 para no saturar memoria
-        for i in range(0, len(ids), 100):
-            collection.upsert(
-                ids=ids[i:i+100],
-                documents=docs[i:i+100],
-                metadatas=metas[i:i+100],
-            )
-        return len(ids)
+        from supabase import create_client
+        return create_client(url, key)
     except Exception:
-        return 0
+        return None
 
 
-def buscar_similares_rag(texto: str, n: int = 5, umbral: float = 0.45) -> list[dict]:
+def _cargar_desde_supabase() -> dict | None:
     """
-    Busca productos semánticamente similares en ChromaDB.
-    Devuelve lista de {sku, nombre, similitud, por_rag}.
-    umbral: distancia coseno máxima (0=idéntico, 1=opuesto); 0.45 ≈ 55% similitud.
+    Carga productos desde Supabase (tabla odoo_productos).
+    Devuelve dict con skus, productos, phashes, imagen_urls o None si no hay datos.
     """
-    if not texto.strip():
-        return []
+    sb = _supabase_client()
+    if not sb:
+        return None
     try:
-        collection = _get_chroma_collection()
-        total = collection.count()
-        if total == 0:
-            return []
-        results   = collection.query(query_texts=[texto], n_results=min(n, total))
-        similares = []
-        for dist, meta in zip(results["distances"][0], results["metadatas"][0]):
-            if dist <= umbral:
-                similares.append({
-                    "sku":       meta.get("sku", ""),
-                    "nombre":    meta.get("nombre", ""),
-                    "similitud": round(1.0 - dist, 3),
-                    "por_rag":   True,
-                })
-        return similares
+        import imagehash
+        resp = sb.table("odoo_productos").select(
+            "sku,nombre,phash_hex,imagen_url,actualizado_en"
+        ).execute()
+        rows = resp.data or []
+        if not rows:
+            return None
+        skus        = [r["sku"] for r in rows]
+        productos   = [{"default_code": r["sku"], "name": r.get("nombre", "")} for r in rows]
+        phashes     = {}
+        imagen_urls = {}
+        for r in rows:
+            sku = r["sku"]
+            if r.get("phash_hex"):
+                try:
+                    phashes[sku] = imagehash.hex_to_hash(r["phash_hex"])
+                except Exception:
+                    pass
+            if r.get("imagen_url"):
+                imagen_urls[sku] = r["imagen_url"]
+        ts_str = max((r.get("actualizado_en", "") for r in rows), default="")
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            ts = datetime.now()
+        return {
+            "timestamp":   ts,
+            "skus":        skus,
+            "productos":   productos,
+            "phashes":     phashes,
+            "imagen_urls": imagen_urls,
+        }
     except Exception:
-        return []
+        return None
+
+
+def _sincronizar_a_supabase(prods_odoo: list[dict]) -> dict:
+    """
+    Sube productos de ODOO a Supabase:
+    - Calcula phash para cada imagen
+    - Sube la imagen al bucket 'odoo-imagenes'
+    - Hace upsert en tabla 'odoo_productos'
+    Devuelve dict con phashes e imagen_urls calculados.
+    """
+    sb          = _supabase_client()
+    phashes     = {}
+    imagen_urls = {}
+    if not sb:
+        return {"phashes": phashes, "imagen_urls": imagen_urls}
+
+    rows_to_upsert = []
+    bucket = sb.storage.from_("odoo-imagenes")
+    for p in prods_odoo:
+        sku    = p.get("default_code", "")
+        nombre = p.get("name", "")
+        if not sku:
+            continue
+
+        phash_hex  = None
+        imagen_url = None
+        img_b64    = p.get("image_128")
+
+        if img_b64:
+            try:
+                img_bytes = base64.b64decode(img_b64)
+                ph = _phash_imagen(img_bytes)
+                if ph is not None:
+                    phash_hex    = str(ph)
+                    phashes[sku] = ph
+                bucket.upload(
+                    f"{sku}.png",
+                    img_bytes,
+                    {"content-type": "image/png", "x-upsert": "true"},
+                )
+                imagen_url       = bucket.get_public_url(f"{sku}.png")
+                imagen_urls[sku] = imagen_url
+            except Exception:
+                pass
+
+        rows_to_upsert.append({
+            "sku":        sku,
+            "nombre":     nombre,
+            "phash_hex":  phash_hex,
+            "imagen_url": imagen_url,
+        })
+
+    # Upsert en batches de 100
+    try:
+        for i in range(0, len(rows_to_upsert), 100):
+            sb.table("odoo_productos").upsert(rows_to_upsert[i:i+100]).execute()
+    except Exception:
+        pass
+
+    return {"phashes": phashes, "imagen_urls": imagen_urls}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2410,23 +2449,12 @@ def enriquecer_con_imagenes(file_bytes: bytes, productos: list[dict]) -> tuple[l
             else:
                 similares = []
 
-            # RAG: búsqueda semántica por título + descripción generados por Haiku
-            texto_rag = f"{datos.get('titulo', '')} {datos.get('descripcion', '')}".strip()
-            similares_rag = buscar_similares_rag(texto_rag)
-            # Fusionar resultados RAG evitando duplicados (mismo SKU)
-            skus_ya = {s["sku"] for s in similares}
-            for sr in similares_rag:
-                if sr["sku"] not in skus_ya:
-                    similares.append(sr)
-
             if similares and conflicto_entry is None:
                 razones = []
                 if any(s.get("por_imagen") for s in similares):
                     razones.append("imagen similar")
                 if any(s.get("por_nombre") for s in similares):
                     razones.append("nombre similar")
-                if any(s.get("por_rag") for s in similares):
-                    razones.append("semántica similar")
                 conflicto_entry = {
                     "idx":              i,
                     "nombre":           prod.get("nombre", f"Producto {i+1}"),
@@ -3008,8 +3036,9 @@ defaults = {
     "_quick_reply":      None,   # respuesta rápida desde botón
     "sku_contadores":          {},
     "odoo_skus":               [],
-    "odoo_productos":          [],   # todos los productos ODOO con name + image_128
+    "odoo_productos":          [],   # todos los productos ODOO con name (sin image_128)
     "odoo_phashes":            {},   # {sku: phash}
+    "odoo_imagen_urls":        {},   # {sku: url_publica_supabase}
     "odoo_conectado":          False,
     "esperando_duplicados":    False,
     "dup_paso":                1,       # 1 = mostrar grupos, 2 = ejecutar y generar SKUs
@@ -3077,20 +3106,20 @@ with st.sidebar:
     col_odoo1, col_odoo2 = st.columns(2)
     with col_odoo1:
         cargar_btn = st.button("🔄 Cargar SKUs", width="stretch",
-                               help="Usa cache local si tiene menos de 24h")
+                               help="Usa Supabase si tiene datos; si no, carga desde ODOO")
     with col_odoo2:
         forzar_btn = st.button("🔃 Actualizar", width="stretch",
-                               help="Fuerza recarga desde ODOO ignorando cache")
+                               help="Fuerza recarga desde ODOO y sincroniza a Supabase")
 
-    def _aplicar_datos_odoo(skus, productos, phashes, desde_cache=False, n_rag=0):
-        st.session_state.odoo_skus      = skus
-        st.session_state.odoo_productos = productos
-        st.session_state.odoo_phashes   = phashes
-        st.session_state.odoo_conectado = True
+    def _aplicar_datos_odoo(skus, productos, phashes, imagen_urls=None, desde_cache=False):
+        st.session_state.odoo_skus       = skus
+        st.session_state.odoo_productos  = productos
+        st.session_state.odoo_phashes    = phashes
+        st.session_state.odoo_imagen_urls = imagen_urls or {}
+        st.session_state.odoo_conectado  = True
         sin_img = len(skus) - len(phashes)
-        origen  = "cache local" if desde_cache else "ODOO"
-        rag_txt = f" · {n_rag} indexados en RAG" if n_rag else ""
-        st.success(f"✅ {len(skus)} SKUs · {len(phashes)} imágenes · {sin_img} sin imagen{rag_txt}  —  {origen}")
+        origen  = "Supabase" if desde_cache else "ODOO"
+        st.success(f"✅ {len(skus)} SKUs · {len(phashes)} imágenes · {sin_img} sin imagen  —  {origen}")
 
     def _cargar_desde_odoo(forzar=False):
         odoo_url  = os.environ.get("ODOO_URL", "")
@@ -3101,41 +3130,56 @@ with st.sidebar:
             st.warning("Faltan credenciales ODOO en el .env")
             return
 
-        # Intentar cache primero (salvo que sea carga forzada)
+        # 1. Intentar Supabase primero (salvo recarga forzada)
         if not forzar:
+            with st.spinner("Cargando desde Supabase..."):
+                sb_data = _cargar_desde_supabase()
+            if sb_data:
+                _aplicar_datos_odoo(
+                    sb_data["skus"], sb_data["productos"], sb_data["phashes"],
+                    imagen_urls=sb_data["imagen_urls"], desde_cache=True,
+                )
+                return
+            # Fallback: cache local pkl
             cache = cargar_cache_odoo()
             if cache:
-                # ChromaDB ya persiste en disco — solo cargar en sesión
-                try:
-                    n_rag = _get_chroma_collection().count()
-                except Exception:
-                    n_rag = 0
-                _aplicar_datos_odoo(cache["skus"], cache["productos"], cache["phashes"],
-                                    desde_cache=True, n_rag=n_rag)
+                _aplicar_datos_odoo(
+                    cache["skus"], cache["productos"], cache["phashes"],
+                    desde_cache=True,
+                )
                 return
 
-        # Cargar desde ODOO
+        # 2. Cargar desde ODOO
         with st.spinner("Conectando a ODOO..."):
             skus, error = cargar_skus_odoo(odoo_url, odoo_db, odoo_user, odoo_pass)
         if error:
             st.error(f"Error: {error}")
             return
-        with st.spinner("Descargando productos e imágenes..."):
+        with st.spinner("Descargando productos e imágenes desde ODOO..."):
             prods_odoo = cargar_todos_productos_odoo(odoo_url, odoo_db, odoo_user, odoo_pass)
-        with st.spinner("Calculando hashes de imágenes..."):
-            phashes = {}
-            for p in prods_odoo:
-                if p.get("image_128"):
-                    try:
-                        h = _phash_imagen(base64.b64decode(p["image_128"]))
-                        if h is not None:
-                            phashes[p["default_code"]] = h
-                    except Exception:
-                        pass
-        with st.spinner("Indexando en ChromaDB (RAG)..."):
-            n_rag = indexar_productos_chroma(prods_odoo)
-        guardar_cache_odoo(skus, prods_odoo, phashes)
-        _aplicar_datos_odoo(skus, prods_odoo, phashes, desde_cache=False, n_rag=n_rag)
+
+        # 3. Sincronizar a Supabase (calcula phashes, sube imágenes, guarda filas)
+        with st.spinner("Sincronizando con Supabase..."):
+            sb_result = _sincronizar_a_supabase(prods_odoo)
+        phashes     = sb_result["phashes"]
+        imagen_urls = sb_result["imagen_urls"]
+
+        # Si Supabase no está configurado, calcular phashes localmente y guardar pkl
+        if not phashes:
+            with st.spinner("Calculando hashes de imágenes..."):
+                for p in prods_odoo:
+                    if p.get("image_128"):
+                        try:
+                            h = _phash_imagen(base64.b64decode(p["image_128"]))
+                            if h is not None:
+                                phashes[p["default_code"]] = h
+                        except Exception:
+                            pass
+            guardar_cache_odoo(skus, prods_odoo, phashes)
+
+        # Quitar image_128 de memoria antes de guardar en session_state
+        prods_sin_img = [{k: v for k, v in p.items() if k != "image_128"} for p in prods_odoo]
+        _aplicar_datos_odoo(skus, prods_sin_img, phashes, imagen_urls=imagen_urls, desde_cache=False)
 
     if cargar_btn:
         _cargar_desde_odoo(forzar=False)
@@ -4524,12 +4568,9 @@ if st.session_state.get("agregar_lote_activo"):
                         sim_cols = st.columns(min(len(c_similares), 3))
                         for si, sim in enumerate(c_similares[:3]):
                             with sim_cols[si]:
-                                prod_odoo = sim.get("producto_odoo", {})
-                                if prod_odoo.get("image_128"):
-                                    try:
-                                        st.image(base64.b64decode(prod_odoo["image_128"]), width=100)
-                                    except Exception:
-                                        pass
+                                _img_url = st.session_state.get("odoo_imagen_urls", {}).get(sim["sku"])
+                                if _img_url:
+                                    st.image(_img_url, width=100)
                                 st.caption(
                                     f"SKU: `{sim['sku']}`  \n"
                                     f"{sim.get('nombre', '—')}"
@@ -5052,19 +5093,10 @@ with tab_agregar:
                 else:
                     _sims = []
 
-                # RAG: búsqueda semántica (igual que Tab 1)
-                _texto_rag = f"{_datos.get('titulo', '')} {_datos.get('descripcion', '')}".strip()
-                _sims_rag  = buscar_similares_rag(_texto_rag)
-                _skus_ya   = {s["sku"] for s in _sims}
-                for _sr in _sims_rag:
-                    if _sr["sku"] not in _skus_ya:
-                        _sims.append(_sr)
-
                 if _sims and _conf_entry is None:
                     _razones = []
                     if any(s.get("por_imagen") for s in _sims): _razones.append("imagen similar")
                     if any(s.get("por_nombre") for s in _sims): _razones.append("nombre similar")
-                    if any(s.get("por_rag")    for s in _sims): _razones.append("semántica similar")
                     _conf_entry = {
                         "idx": _i, "nombre": _nombre_manual,
                         "sku_propuesto": _sku_ini, "sku_ajustado": _sku_ini,
@@ -5162,12 +5194,9 @@ with tab_agregar:
                     _sc = st.columns(min(len(_c_similares), 3))
                     for _si, _sim in enumerate(_c_similares[:3]):
                         with _sc[_si]:
-                            _po = _sim.get("producto_odoo", {})
-                            if _po.get("image_128"):
-                                try:
-                                    st.image(base64.b64decode(_po["image_128"]), width=100)
-                                except Exception:
-                                    pass
+                            _img_url = st.session_state.get("odoo_imagen_urls", {}).get(_sim["sku"])
+                            if _img_url:
+                                st.image(_img_url, width=100)
                             st.caption(f"SKU: `{_sim['sku']}`  \n{_sim.get('nombre', '—')}")
 
                 _dec_conf = st.radio(

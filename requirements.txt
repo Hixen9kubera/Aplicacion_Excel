@@ -5,7 +5,4 @@ langchain-anthropic>=1.4.0
 langchain-core>=1.2.22
 anthropic>=0.86.0
 imagehash>=4.3.2
-chromadb>=1.5.5
-sentence-transformers>=5.1.2
-torch
-torchvision
+supabase>=2.0.0

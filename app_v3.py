@@ -2988,6 +2988,533 @@ def generar_excel_purchase(productos: list[dict], tipo_cambio: float,
     return buf.read()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Clasificación padre / variante — flujo unificado
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _generar_sku_padre(subcategoria_cod: str) -> str:
+    """Genera SKU de producto padre: SUBCAT-NNNN (sin atributo)."""
+    sub = subcategoria_cod.strip().upper() if subcategoria_cod else _SUBCAT_DEFAULT
+    if sub not in SUBCATEGORIAS:
+        sub = _SUBCAT_DEFAULT
+    contadores = st.session_state.setdefault("sku_contadores", {})
+    contadores[sub] = contadores.get(sub, 0) + 1
+    sku = f"{sub}-{contadores[sub]:04d}"
+    if st.session_state.get("modo_prueba"):
+        sku += "_test"
+    return sku
+
+
+def _atributo_cod_desde_valor(atributo_valor: str | None) -> str | None:
+    """Mapea atributo_valor al código de SKU del dict ATRIBUTOS. Fallback: 3 letras."""
+    if not atributo_valor:
+        return None
+    val_lower = atributo_valor.lower().strip()
+    for cod, desc in ATRIBUTOS.items():
+        if desc.lower() == val_lower or cod.lower() == val_lower:
+            return cod
+    return atributo_valor[:3].upper()
+
+
+def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
+    """
+    Llama a Claude Haiku una sola vez para extraer nombre_base, atributo_tipo
+    y atributo_valor de todos los productos.
+    Devuelve lista de dicts en el mismo orden que 'productos'.
+    """
+    if not productos:
+        return []
+    lineas = []
+    for i, p in enumerate(productos):
+        nombre = p.get("nombre") or p.get("titulo") or f"Producto {i+1}"
+        lineas.append(f"{i}: {nombre}")
+    prompt = (
+        "Analiza estos nombres de productos de una importación de contenedor.\n"
+        "Para cada uno extrae:\n"
+        "- nombre_base: nombre base SIN color, talla o material específico\n"
+        "- atributo_tipo: \"Color\", \"Talla\", \"Material\", o null si no hay atributo distinguible\n"
+        "- atributo_valor: valor concreto (\"Azul\", \"XL\", \"Madera\") o null\n\n"
+        "IMPORTANTE: Si dos o más productos son el mismo tipo base con distinto color/talla/material "
+        "(ej: \"Mesa Negra\" y \"Mesa Blanca\"), deben tener el MISMO nombre_base.\n\n"
+        "Responde SOLO con JSON array (mismo orden, sin texto extra):\n"
+        "[{\"nombre_base\":\"...\",\"atributo_tipo\":\"...\",\"atributo_valor\":\"...\"}, ...]\n\n"
+        "Productos:\n" + "\n".join(lineas)
+    )
+    try:
+        llm  = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=2000)
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        content = resp.content
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        content = content.strip()
+        start = content.find("[")
+        end   = content.rfind("]") + 1
+        if start >= 0 and end > start:
+            content = content[start:end]
+        resultados = json.loads(content)
+        while len(resultados) < len(productos):
+            resultados.append({"nombre_base": None, "atributo_tipo": None, "atributo_valor": None})
+        return resultados[:len(productos)]
+    except Exception:
+        return [{"nombre_base": None, "atributo_tipo": None, "atributo_valor": None}
+                for _ in productos]
+
+
+def _buscar_padre_en_odoo_por_nombre(nombre_base: str, prods_odoo: list[dict],
+                                      phashes_odoo: dict,
+                                      imagen_data: bytes | None = None,
+                                      umbral: float = 0.75) -> dict | None:
+    """
+    Busca en prods_odoo el mejor candidato a template padre por nombre similar.
+    Opcionalmente pondera con similitud de imagen (phash).
+    Devuelve dict {prod, score, sim_nombre} o None.
+    """
+    if not nombre_base or not prods_odoo:
+        return None
+    phash_nuevo = _phash_imagen(imagen_data) if imagen_data else None
+    mejor       = None
+    mejor_score = 0.0
+    for prod in prods_odoo:
+        nombre_odo = prod.get("name", "")
+        sim_nombre = _similitud_nombres(nombre_base, nombre_odo)
+        sim_img    = 0.0
+        sku        = prod.get("default_code", "")
+        if phash_nuevo is not None and sku in phashes_odoo:
+            dist    = phash_nuevo - phashes_odoo[sku]
+            sim_img = max(0.0, 1.0 - dist / 64.0)
+        score = sim_nombre * 0.7 + sim_img * 0.3
+        if score > mejor_score and sim_nombre >= umbral:
+            mejor_score = score
+            mejor = {"prod": prod, "score": round(score, 3), "sim_nombre": round(sim_nombre, 3)}
+    return mejor
+
+
+def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> list[dict]:
+    """
+    Análisis unificado padre/variante para todos los productos del packing list.
+    Reemplaza la detección de duplicados + la detección de conflictos SKU.
+
+    Flujo:
+    1. Extrae imágenes del Excel y las guarda en temp
+    2. Claude Vision por producto (subcategoria_cod, atributo_cod, descripcion…)
+    3. Extrae nombre_base + atributo en batch (un solo call a Claude Haiku)
+    4. Busca padres en Odoo por nombre
+    5. Agrupa por nombre_base (detecta variantes y duplicados locales)
+    6. Genera propuesta de SKU y acción para cada producto
+
+    Devuelve lista de propuestas (una por producto del packing list).
+    """
+    imagenes     = extraer_imagenes_excel(file_bytes)
+    prods_odoo   = st.session_state.get("odoo_productos", [])
+    phashes_odoo = st.session_state.get("odoo_phashes", {})
+    skus_odoo    = st.session_state.get("odoo_skus", [])
+
+    if skus_odoo:
+        sincronizar_contadores_con_odoo(skus_odoo)
+    if imagenes:
+        guardar_imagenes_temp(imagenes, productos)
+
+    # ── Paso 1: Claude Vision por producto ────────────────────────────────────
+    datos_vision: dict[int, dict] = {}
+    for i, prod in enumerate(productos):
+        row_num = prod.get("fila_excel_0idx", i + 1)
+        img     = imagenes.get(row_num)
+        if img:
+            ctx   = {"nombre": prod.get("nombre"), "material": prod.get("material"),
+                     "uso": prod.get("uso")}
+            datos = analizar_imagen_claude(img["data"], img["ext"], ctx)
+        else:
+            datos = _inferir_categoria_manual(
+                prod.get("nombre", ""), prod.get("material", ""), prod.get("uso", "")
+            )
+            datos.setdefault("atributo_desc", datos.get("atributo_cod", ""))
+        datos_vision[i] = datos
+
+    # ── Paso 2: Nombre base + atributo en batch ───────────────────────────────
+    clasificaciones = _extraer_nombre_base_atributo_batch(productos)
+
+    # ── Paso 3: Construir propuestas ──────────────────────────────────────────
+    # Registro local: nombre_base → {sku_padre, subcod, numero, odoo_id, odoo_nombre,
+    #                                 padre_idx, variantes: {att_cod: {sku, idx}}}
+    registro: dict[str, dict] = {}
+    propuestas: list[dict] = []
+
+    ACCION_LABELS = {
+        "crear_padre_y_variante": "🆕 Padre nuevo + variante nueva",
+        "crear_padre_solo":       "🆕 Padre nuevo (sin variante)",
+        "crear_variante":         "➕ Variante nueva en padre existente",
+        "reutilizar":             "♻️ Reutilizar producto existente",
+        "duplicado":              "🔁 Duplicado — mismo producto ya registrado",
+    }
+
+    for i, prod in enumerate(productos):
+        datos   = datos_vision[i]
+        clas    = clasificaciones[i] if i < len(clasificaciones) else {}
+        row_num = prod.get("fila_excel_0idx", i + 1)
+        img     = imagenes.get(row_num)
+        img_data = img["data"] if img else None
+
+        nombre      = prod.get("nombre") or f"Producto {i+1}"
+        nombre_base = (clas.get("nombre_base") or nombre).strip()
+        att_tipo    = clas.get("atributo_tipo")
+        att_valor   = clas.get("atributo_valor")
+        att_cod     = _atributo_cod_desde_valor(att_valor) or datos.get("atributo_cod")
+        sub_cod     = datos.get("subcategoria_cod") or "VAR"
+
+        prop: dict = {
+            "idx":             i,
+            "producto":        prod,
+            "nombre":          nombre,
+            "nombre_base":     nombre_base,
+            "atributo_tipo":   att_tipo,
+            "atributo_valor":  att_valor,
+            "atributo_cod":    att_cod,
+            "subcategoria_cod": sub_cod,
+            "datos_vision":    datos,
+            "imagen_data":     img_data,
+            "padre_fuente":    "nuevo",
+            "padre_odoo_id":   None,
+            "padre_odoo_nombre": "",
+            "padre_sku":       "",
+            "sku":             "",
+            "accion":          "crear_padre_y_variante",
+            "accion_display":  "",
+            "confianza_padre": 0.0,
+            "requiere_revision": False,
+            "nota_revision":   "",
+            "duplicado_de_idx": None,
+        }
+
+        if nombre_base in registro:
+            # ── Padre ya en registro local ─────────────────────────────────
+            entrada = registro[nombre_base]
+            prop.update({
+                "padre_fuente":      "local",
+                "padre_sku":         entrada["sku_padre"],
+                "padre_odoo_id":     entrada["odoo_id"],
+                "padre_odoo_nombre": entrada["odoo_nombre"],
+                "confianza_padre":   1.0,
+            })
+            if not att_cod:
+                # Sin atributo → duplicado del padre
+                prop["accion"]           = "duplicado"
+                prop["duplicado_de_idx"] = entrada.get("padre_idx")
+                prop["sku"]              = entrada["sku_padre"]
+            elif att_cod in entrada["variantes"]:
+                # Misma variante ya existe en este packing list
+                prop["accion"]           = "duplicado"
+                prop["duplicado_de_idx"] = entrada["variantes"][att_cod]["idx"]
+                prop["sku"]              = entrada["variantes"][att_cod]["sku"]
+            else:
+                # Nueva variante del mismo padre
+                prop["accion"] = "crear_variante"
+                sku_var = _sku_mismo_numero(entrada["subcod"], entrada["numero"], att_cod)
+                if skus_odoo:
+                    sku_var = validar_sku_vs_odoo(sku_var, skus_odoo)["sku_ajustado"]
+                prop["sku"] = sku_var
+                entrada["variantes"][att_cod] = {"sku": sku_var, "idx": i}
+        else:
+            # ── Buscar en Odoo ─────────────────────────────────────────────
+            candidato = None
+            if prods_odoo:
+                candidato = _buscar_padre_en_odoo_por_nombre(
+                    nombre_base, prods_odoo, phashes_odoo, img_data
+                )
+
+            if candidato:
+                prod_odoo  = candidato["prod"]
+                sku_odoo   = prod_odoo.get("default_code", "")
+                partes     = sku_odoo.replace("_test", "").split("-")
+                try:
+                    num_odoo = int(partes[1]) if len(partes) >= 2 else 1
+                    sub_odoo = partes[0]
+                except (ValueError, IndexError):
+                    num_odoo, sub_odoo = 1, sub_cod
+                prop.update({
+                    "padre_fuente":      "odoo",
+                    "padre_odoo_id":     prod_odoo.get("id"),
+                    "padre_odoo_nombre": prod_odoo.get("name", ""),
+                    "padre_sku":         sku_odoo,
+                    "confianza_padre":   candidato["score"],
+                })
+                if att_cod:
+                    sku_var = _sku_mismo_numero(sub_odoo, num_odoo, att_cod)
+                    if skus_odoo:
+                        sku_var = validar_sku_vs_odoo(sku_var, skus_odoo)["sku_ajustado"]
+                    prop["sku"]    = sku_var
+                    prop["accion"] = "crear_variante"
+                else:
+                    prop["sku"]    = sku_odoo
+                    prop["accion"] = "reutilizar"
+                registro[nombre_base] = {
+                    "sku_padre": sku_odoo, "subcod": sub_odoo, "numero": num_odoo,
+                    "odoo_id": prod_odoo.get("id"), "odoo_nombre": prod_odoo.get("name", ""),
+                    "padre_idx": i,
+                    "variantes": {att_cod: {"sku": prop["sku"], "idx": i}} if att_cod else {},
+                }
+            else:
+                # ── Crear padre nuevo ──────────────────────────────────────
+                sku_padre = _generar_sku_padre(sub_cod)
+                partes    = sku_padre.replace("_test", "").split("-")
+                try:
+                    num_nuevo = int(partes[1]) if len(partes) >= 2 else 1
+                except (ValueError, IndexError):
+                    num_nuevo = 1
+                prop["padre_sku"] = sku_padre
+                if att_cod:
+                    sku_var = _sku_mismo_numero(sub_cod, num_nuevo, att_cod)
+                    if skus_odoo:
+                        sku_var = validar_sku_vs_odoo(sku_var, skus_odoo)["sku_ajustado"]
+                    prop["sku"]    = sku_var
+                    prop["accion"] = "crear_padre_y_variante"
+                else:
+                    prop["sku"]    = sku_padre
+                    prop["accion"] = "crear_padre_solo"
+                registro[nombre_base] = {
+                    "sku_padre": sku_padre, "subcod": sub_cod, "numero": num_nuevo,
+                    "odoo_id": None, "odoo_nombre": "",
+                    "padre_idx": i,
+                    "variantes": {att_cod: {"sku": prop["sku"], "idx": i}} if att_cod else {},
+                }
+
+        prop["accion_display"] = ACCION_LABELS.get(prop["accion"], prop["accion"])
+
+        # Enriquecer el producto con datos de visión para el Excel
+        prod.update({
+            "sku":             prop["sku"],
+            "subcategoria_cod": sub_cod,
+            "atributo_cod":    att_cod or datos.get("atributo_cod", "EST"),
+            "atributo_desc":   att_valor or datos.get("atributo_desc", ""),
+            "atributo":        att_valor or datos.get("atributo_desc", ""),
+            "descripcion":     datos.get("descripcion", ""),
+            "categoria":       datos.get("categoria", ""),
+            "titulo":          datos.get("titulo") or nombre,
+        })
+        propuestas.append(prop)
+
+    return propuestas
+
+
+def generar_reporte_clasificacion(propuestas: list[dict], nombre_packing: str = "") -> bytes:
+    """
+    Genera Excel de reporte de clasificación para revisión de bodega.
+    Columnas: Fila PL, Nombre, Nombre Base, SKU, Padre SKU, Atributo, Acción,
+              Padre en Odoo, Requiere Revisión, Nota.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Clasificación Productos"
+
+    from openpyxl.styles import PatternFill as _PF, Font as _Ft, Alignment as _Al
+
+    HEADERS = [
+        "Fila PL", "Nombre producto", "Nombre base", "SKU propuesto",
+        "SKU padre", "Tipo atributo", "Valor atributo",
+        "Acción", "Padre en Odoo", "Requiere revisión", "Nota",
+    ]
+    hdr_fill = _PF("solid", fgColor="1F3864")
+    hdr_font = _Ft(color="FFFFFF", bold=True, size=10)
+    aln_ctr  = _Al(horizontal="center", vertical="center", wrap_text=True)
+    aln_lft  = _Al(horizontal="left",   vertical="center", wrap_text=True)
+
+    for c, h in enumerate(HEADERS, 1):
+        cell = ws.cell(1, c, h)
+        cell.fill      = hdr_fill
+        cell.font      = hdr_font
+        cell.alignment = aln_ctr
+
+    FILL_REV  = _PF("solid", fgColor="FFF2CC")   # amarillo — requiere revisión
+    FILL_DUP  = _PF("solid", fgColor="E2EFDA")   # verde claro — duplicado
+    FILL_ODOO = _PF("solid", fgColor="DAE8FC")   # azul claro — desde Odoo
+    FILL_NONE = _PF(fill_type=None)
+
+    for r, prop in enumerate(propuestas, 2):
+        prod   = prop["producto"]
+        fila   = str((prod.get("fila_excel_0idx") or 0) + 1)
+        accion = prop["accion"]
+        if prop["requiere_revision"]:
+            fill = FILL_REV
+        elif accion == "duplicado":
+            fill = FILL_DUP
+        elif prop["padre_fuente"] == "odoo":
+            fill = FILL_ODOO
+        else:
+            fill = FILL_NONE
+
+        att_str = ""
+        if prop.get("atributo_tipo") and prop.get("atributo_valor"):
+            att_tipo  = prop["atributo_tipo"]
+            att_valor = prop["atributo_valor"]
+        else:
+            att_tipo  = prop.get("atributo_tipo") or "—"
+            att_valor = prop.get("atributo_valor") or "—"
+
+        valores = [
+            fila,
+            prop["nombre"],
+            prop["nombre_base"],
+            prop["sku"],
+            prop["padre_sku"] or "—",
+            att_tipo,
+            att_valor,
+            prop["accion_display"],
+            prop["padre_odoo_nombre"] or "—",
+            "⚠️ SÍ" if prop["requiere_revision"] else "",
+            prop["nota_revision"] or "",
+        ]
+        for c, v in enumerate(valores, 1):
+            cell = ws.cell(r, c, v)
+            cell.fill      = fill
+            cell.alignment = aln_lft if c in (2, 3, 11) else aln_ctr
+
+    widths = [8, 30, 25, 16, 14, 14, 16, 26, 25, 16, 30]
+    for c, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.row_dimensions[1].height = 30
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+def crear_clasificacion_en_odoo(propuestas: list[dict],
+                                 tipo_cambio: float,
+                                 costo_contenedor: float) -> tuple[list[str], list[str]]:
+    """
+    Crea templates padre y variantes en Odoo según las propuestas confirmadas.
+    Devuelve (resultados_ok, errores).
+    """
+    odoo_url  = os.environ.get("ODOO_URL", "")
+    odoo_db   = os.environ.get("ODOO_DB", "")
+    odoo_user = os.environ.get("ODOO_USER", "")
+    odoo_pass = os.environ.get("ODOO_PASSWORD", "")
+    if not all([odoo_url, odoo_db, odoo_user, odoo_pass]):
+        return [], ["Faltan credenciales ODOO en .env"]
+    try:
+        common = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True)
+        uid    = common.authenticate(odoo_db, odoo_user, odoo_pass, {})
+        models = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True)
+    except Exception as e:
+        return [], [f"No se pudo conectar a ODOO: {e}"]
+
+    cbm_total    = sum(_cbm_total_fila(p["producto"])
+                       for p in propuestas if p["accion"] != "duplicado")
+    costo_por_m3 = costo_contenedor / cbm_total if cbm_total > 0 else 0.0
+
+    templates_creados: dict[str, int] = {}  # sku_padre → tmpl_id
+    attrs_cache:       dict[str, int] = {}  # nombre_attr → attr_id
+    attr_vals_cache:   dict[tuple, int] = {}  # (attr_id, valor) → value_id
+
+    def _get_or_create_attr(nombre: str) -> int:
+        if nombre in attrs_cache:
+            return attrs_cache[nombre]
+        ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.attribute", "search",
+                                [[["name", "=", nombre]]])
+        aid = ids[0] if ids else models.execute_kw(
+            odoo_db, uid, odoo_pass, "product.attribute", "create", [{"name": nombre}])
+        attrs_cache[nombre] = aid
+        return aid
+
+    def _get_or_create_val(attr_id: int, valor: str) -> int:
+        key = (attr_id, valor)
+        if key in attr_vals_cache:
+            return attr_vals_cache[key]
+        ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.attribute.value", "search",
+                                [[["attribute_id", "=", attr_id], ["name", "=", valor]]])
+        vid = ids[0] if ids else models.execute_kw(
+            odoo_db, uid, odoo_pass, "product.attribute.value", "create",
+            [{"name": valor, "attribute_id": attr_id}])
+        attr_vals_cache[key] = vid
+        return vid
+
+    resultados: list[str] = []
+    errores:    list[str] = []
+
+    for prop in propuestas:
+        if prop["requiere_revision"] or prop["accion"] == "duplicado":
+            continue
+        prod           = prop["producto"]
+        accion         = prop["accion"]
+        sku            = prop["sku"]
+        sku_padre      = prop["padre_sku"]
+        att_tipo       = prop["atributo_tipo"] or "Variante"
+        att_valor      = prop["atributo_valor"] or "Estándar"
+        nombre_base    = prop["nombre_base"]
+        nombre         = prop["nombre"]
+        precio_usd     = _safe_float(prod.get("precio_usd"))
+        precio_mxn     = round(precio_usd * tipo_cambio, 2)
+        costo_unitario = round(precio_mxn + _cbm_por_pieza(prod) * costo_por_m3, 2)
+        try:
+            if accion in ("crear_padre_y_variante", "crear_padre_solo"):
+                vals = {"name": nombre_base, "type": "product",
+                        "sale_ok": True, "purchase_ok": True,
+                        "list_price": precio_mxn, "standard_price": costo_unitario}
+                if accion == "crear_padre_solo":
+                    vals["default_code"] = sku
+                tmpl_id = models.execute_kw(
+                    odoo_db, uid, odoo_pass, "product.template", "create", [vals])
+                templates_creados[sku_padre] = tmpl_id
+                if accion == "crear_padre_solo":
+                    resultados.append(f"✅ Padre creado: `{sku}` — {nombre_base}")
+                else:
+                    attr_id = _get_or_create_attr(att_tipo)
+                    val_id  = _get_or_create_val(attr_id, att_valor)
+                    models.execute_kw(odoo_db, uid, odoo_pass,
+                                      "product.template.attribute.line", "create",
+                                      [{"product_tmpl_id": tmpl_id, "attribute_id": attr_id,
+                                        "value_ids": [(4, val_id)]}])
+                    var_ids = models.execute_kw(odoo_db, uid, odoo_pass,
+                                                "product.product", "search",
+                                                [[["product_tmpl_id", "=", tmpl_id]]])
+                    if var_ids:
+                        models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
+                                          [var_ids, {"default_code": sku,
+                                                     "standard_price": costo_unitario}])
+                    resultados.append(f"✅ Padre + variante: `{sku_padre}` / `{sku}` — {nombre}")
+
+            elif accion == "crear_variante":
+                tmpl_id = (templates_creados.get(sku_padre)
+                           or prop.get("padre_odoo_id"))
+                if not tmpl_id:
+                    errores.append(f"⚠️ No se encontró template padre para `{sku}` ({nombre})")
+                    continue
+                attr_id = _get_or_create_attr(att_tipo)
+                val_id  = _get_or_create_val(attr_id, att_valor)
+                lineas  = models.execute_kw(
+                    odoo_db, uid, odoo_pass, "product.template.attribute.line", "search_read",
+                    [[["product_tmpl_id", "=", tmpl_id], ["attribute_id", "=", attr_id]]],
+                    {"fields": ["id"]})
+                if lineas:
+                    models.execute_kw(odoo_db, uid, odoo_pass,
+                                      "product.template.attribute.line", "write",
+                                      [[lineas[0]["id"]], {"value_ids": [(4, val_id)]}])
+                else:
+                    models.execute_kw(odoo_db, uid, odoo_pass,
+                                      "product.template.attribute.line", "create",
+                                      [{"product_tmpl_id": tmpl_id, "attribute_id": attr_id,
+                                        "value_ids": [(4, val_id)]}])
+                var_ids = models.execute_kw(
+                    odoo_db, uid, odoo_pass, "product.product", "search",
+                    [[["product_tmpl_id", "=", tmpl_id],
+                      ["product_template_attribute_value_ids"
+                       ".product_attribute_value_id", "=", val_id]]])
+                if var_ids:
+                    models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
+                                      [var_ids, {"default_code": sku,
+                                                 "standard_price": costo_unitario}])
+                resultados.append(f"✅ Variante creada: `{sku}` — {nombre}")
+
+            elif accion == "reutilizar":
+                resultados.append(f"♻️ Reutilizado: `{sku}` — {nombre}")
+
+        except Exception as e:
+            errores.append(f"❌ Error en `{sku}` ({nombre}): {e}")
+
+    return resultados, errores
+
+
 # ── Herramienta LangChain ──────────────────────────────────────────────────────
 @tool
 def generar_excel_tool(productos: List[dict] | None = None) -> str:
@@ -3102,8 +3629,12 @@ defaults = {
     "odoo_imagen_urls":        {},   # {sku: url_publica_supabase}
     "odoo_conectado":          False,
     "esperando_duplicados":    False,
-    "dup_paso":                1,       # 1 = mostrar grupos, 2 = ejecutar y generar SKUs
-    "dup_respuestas":          {},      # respuestas del paso 1
+    "dup_paso":                1,
+    "dup_respuestas":          {},
+    # ── Clasificación padre/variante ──────────────────────────────────────────
+    "clasificacion_activa":    False,
+    "clasificacion_propuestas": [],
+    "clasificacion_reporte_bytes": None,
     "duplicados_pendientes":   [],
     "dup_grupos_segunda":      [],      # grupos encontrados en segunda vuelta de detección
     "imagenes_excel":          {},      # {row_0idx: {data, ext}} extraídas antes de duplicados
@@ -3662,27 +4193,12 @@ if archivo is not None:
                     productos = corregir_cbm_inner(productos, advertencias, file_bytes, analisis["columnas"])
                     with st.spinner("Traduciendo y normalizando nombres..."):
                         productos = normalizar_nombres_productos(productos)
-                    with st.spinner("Detectando productos similares o duplicados..."):
-                        _imgs_dup  = extraer_imagenes_excel(file_bytes)
-                        grupos_dup = detectar_productos_duplicados(productos, imagenes=_imgs_dup)
-                    if grupos_dup:
-                        st.session_state.imagenes_excel         = _imgs_dup
-                        st.session_state.duplicados_pendientes = grupos_dup
-                        st.session_state.esperando_duplicados  = True
-                        st.session_state.productos             = productos
-                        st.session_state.advertencias_productos = advertencias
-                        st.rerun()
-                    productos, n_imgs, conflictos = enriquecer_con_imagenes(file_bytes, productos)
-                    st.session_state.productos   = productos
-                    st.session_state.advertencias_productos = advertencias
-                    st.session_state.n_imgs_procesadas      = n_imgs
-                    if conflictos:
-                        st.session_state.conflictos_pendientes   = conflictos
-                        st.session_state.esperando_conflictos    = True
-                    else:
-                        _, errs_ren = renombrar_imagenes_con_sku(productos)
-                        _reportar_errores_imagenes(errs_ren, "renombrado de imágenes")
-                        _iniciar_chat(analisis, productos, advertencias, tipo_cambio, contenedor, n_imgs)
+                    with st.spinner("Analizando clasificación de productos (padres, variantes, duplicados)..."):
+                        propuestas = analizar_clasificacion_packing(file_bytes, productos)
+                    st.session_state.clasificacion_propuestas  = propuestas
+                    st.session_state.clasificacion_activa      = True
+                    st.session_state.productos                 = productos
+                    st.session_state.advertencias_productos    = advertencias
 
             except Exception as e:
                 st.session_state.chat.append({"role": "assistant", "content": f"Error al analizar: {e}"})
@@ -3764,6 +4280,17 @@ with tab_pl:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+
+        # ── Reporte clasificación ─────────────────────────────────────────────
+        _rb = st.session_state.get("clasificacion_reporte_bytes")
+        if _rb:
+            st.download_button(
+                label="⬇️ Descargar Reporte Clasificación (bodega)",
+                data=_rb,
+                file_name=f"{_fn}_CLASIFICACION.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
         # ── Purchase Order ────────────────────────────────────────────────────
         if _eb and _mb:
@@ -3987,29 +4514,12 @@ if st.session_state.esperando_dudas:
                 productos = corregir_cbm_inner(productos, advertencias, st.session_state.file_bytes, columnas_actualizadas)
                 with st.spinner("Traduciendo y normalizando nombres..."):
                     productos = normalizar_nombres_productos(productos)
-                with st.spinner("Detectando productos similares o duplicados..."):
-                    _imgs_dup2  = extraer_imagenes_excel(st.session_state.file_bytes)
-                    grupos_dup  = detectar_productos_duplicados(productos, imagenes=_imgs_dup2)
-                if grupos_dup:
-                    st.session_state.imagenes_excel         = _imgs_dup2
-                    st.session_state.duplicados_pendientes  = grupos_dup
-                    st.session_state.esperando_duplicados   = True
-                    st.session_state.productos              = productos
-                    st.session_state.advertencias_productos = advertencias
-                    st.rerun()
-                with st.spinner("Analizando imágenes y generando SKUs..."):
-                    productos, n_imgs, conflictos = enriquecer_con_imagenes(st.session_state.file_bytes, productos)
-                st.session_state.productos              = productos
-                st.session_state.advertencias_productos = advertencias
-                st.session_state.n_imgs_procesadas      = n_imgs
-                if conflictos:
-                    st.session_state.conflictos_pendientes   = conflictos
-                    st.session_state.esperando_conflictos    = True
-                else:
-                    _, errs_ren = renombrar_imagenes_con_sku(productos)
-                    _reportar_errores_imagenes(errs_ren, "renombrado de imágenes")
-                    with st.spinner("Iniciando el agente..."):
-                        _iniciar_chat(analisis_actualizado, productos, advertencias, tipo_cambio, contenedor, n_imgs)
+                with st.spinner("Analizando clasificación de productos (padres, variantes, duplicados)..."):
+                    propuestas = analizar_clasificacion_packing(st.session_state.file_bytes, productos)
+                st.session_state.clasificacion_propuestas  = propuestas
+                st.session_state.clasificacion_activa      = True
+                st.session_state.productos                 = productos
+                st.session_state.advertencias_productos    = advertencias
 
                 st.rerun()
 
@@ -4475,6 +4985,147 @@ if st.session_state.esperando_conflictos:
             st.rerun()
 
 
+# ── PASO: Revisar clasificación padre/variante ────────────────────────────────
+if st.session_state.get("clasificacion_activa"):
+    with tab_pl:
+        _props      = st.session_state.clasificacion_propuestas
+        _n_props    = len(_props)
+        _analisis_c = st.session_state.get("analisis", {})
+        _advertencias_c = st.session_state.get("advertencias_productos", [])
+        _productos_c    = st.session_state.get("productos", [])
+
+        st.subheader(f"🗂️ Clasificación de {_n_props} producto(s) — revisa y confirma")
+        st.caption(
+            "El agente analizó cada producto y propuso cómo clasificarlos en Odoo. "
+            "Marca **Requiere revisión** en los que quieras que bodega revise manualmente."
+        )
+
+        # ── Resumen rápido ────────────────────────────────────────────────────
+        _acc_counts: dict[str, int] = {}
+        for _p in _props:
+            _acc_counts[_p["accion"]] = _acc_counts.get(_p["accion"], 0) + 1
+        _sum_cols = st.columns(5)
+        for _ci, (_acc, _lbl) in enumerate([
+            ("crear_padre_y_variante", "🆕 Padre+variante"),
+            ("crear_padre_solo",       "🆕 Solo padre"),
+            ("crear_variante",         "➕ Variante"),
+            ("reutilizar",             "♻️ Reutilizar"),
+            ("duplicado",              "🔁 Duplicado"),
+        ]):
+            with _sum_cols[_ci]:
+                st.metric(_lbl, _acc_counts.get(_acc, 0))
+
+        st.divider()
+
+        # ── Tabla editable ────────────────────────────────────────────────────
+        import pandas as _pd
+
+        _df_data = []
+        for _prop in _props:
+            _prod_p = _prop["producto"]
+            _fila   = str((_prod_p.get("fila_excel_0idx") or 0) + 1)
+            _df_data.append({
+                "Fila":             _fila,
+                "Nombre":           _prop["nombre"],
+                "Nombre base":      _prop["nombre_base"],
+                "SKU propuesto":    _prop["sku"],
+                "SKU padre":        _prop["padre_sku"] or "—",
+                "Atributo":         (f"{_prop['atributo_tipo']} / {_prop['atributo_valor']}"
+                                     if _prop.get("atributo_tipo") and _prop.get("atributo_valor")
+                                     else "—"),
+                "Acción":           _prop["accion_display"],
+                "Padre en Odoo":    _prop["padre_odoo_nombre"] or "—",
+                "Requiere revisión": _prop.get("requiere_revision", False),
+                "Nota":             _prop.get("nota_revision", ""),
+            })
+        _df = _pd.DataFrame(_df_data)
+
+        _df_edited = st.data_editor(
+            _df,
+            use_container_width=True,
+            hide_index=True,
+            disabled=["Fila", "Nombre", "Nombre base", "SKU propuesto", "SKU padre",
+                      "Atributo", "Acción", "Padre en Odoo"],
+            column_config={
+                "Requiere revisión": st.column_config.CheckboxColumn(
+                    "⚠️ Rev.",
+                    help="Marca para que bodega lo revise manualmente",
+                    default=False,
+                ),
+                "Nota": st.column_config.TextColumn(
+                    "Nota para bodega",
+                    help="Observación opcional que aparecerá en el reporte",
+                    max_chars=200,
+                ),
+            },
+            key="tabla_clasificacion",
+        )
+
+        # ── Botones de acción ─────────────────────────────────────────────────
+        st.divider()
+        _btn_c1, _btn_c2 = st.columns([3, 1])
+        with _btn_c1:
+            _confirmar = st.button(
+                "✅ Confirmar clasificación y continuar",
+                type="primary",
+                use_container_width=True,
+            )
+        with _btn_c2:
+            if st.session_state.get("clasificacion_reporte_bytes"):
+                st.download_button(
+                    "⬇️ Reporte bodega",
+                    data=st.session_state.clasificacion_reporte_bytes,
+                    file_name=f"{st.session_state.get('filename', 'packing').replace('.xlsx', '')}_CLASIFICACION.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+        if _confirmar:
+            # Aplicar revisiones del editor a las propuestas
+            for _i, _prop in enumerate(_props):
+                if _i < len(_df_edited):
+                    _row = _df_edited.iloc[_i]
+                    _prop["requiere_revision"] = bool(_row.get("Requiere revisión", False))
+                    _prop["nota_revision"]     = str(_row.get("Nota", "") or "")
+
+            # Generar reporte de clasificación (para bodega)
+            _nombre_pl = st.session_state.get("filename", "")
+            _reporte_bytes = generar_reporte_clasificacion(_props, _nombre_pl)
+            st.session_state.clasificacion_reporte_bytes = _reporte_bytes
+
+            # Contar cuántos requieren revisión
+            _n_rev = sum(1 for p in _props if p["requiere_revision"])
+
+            # Mensaje resumen en el chat
+            _res_lines = [f"**Clasificación confirmada — {_n_props} producto(s)**"]
+            _acc_display = {
+                "crear_padre_y_variante": "🆕 Padre nuevo + variante nueva",
+                "crear_padre_solo":       "🆕 Padre nuevo (sin variante)",
+                "crear_variante":         "➕ Variante nueva en padre existente",
+                "reutilizar":             "♻️ Reutilizado desde Odoo",
+                "duplicado":              "🔁 Duplicado (se ignorará)",
+            }
+            for _acc, _cnt in sorted(_acc_counts.items()):
+                if _cnt:
+                    _res_lines.append(f"- {_acc_display.get(_acc, _acc)}: **{_cnt}**")
+            if _n_rev:
+                _res_lines.append(f"\n⚠️ **{_n_rev} producto(s) marcados para revisión en bodega** — incluidos en el reporte.")
+
+            st.session_state.chat.append({"role": "assistant", "content": "\n".join(_res_lines)})
+
+            # Limpiar estado de clasificación y arrancar chat
+            st.session_state.clasificacion_activa = False
+
+            # Renombrar imágenes temp con los SKUs definitivos
+            _, _errs_ren_c = renombrar_imagenes_con_sku(_productos_c)
+            _reportar_errores_imagenes(_errs_ren_c, "renombrado de imágenes")
+
+            with st.spinner("Iniciando el agente..."):
+                _n_imgs_c = st.session_state.get("n_imgs_procesadas", 0)
+                _iniciar_chat(_analisis_c, _productos_c, _advertencias_c,
+                              tipo_cambio, contenedor, _n_imgs_c)
+            st.rerun()
+
 
 # ── PASO: Agregar productos en lote ──────────────────────────────────────────
 if st.session_state.get("agregar_lote_activo"):
@@ -4787,6 +5438,8 @@ with tab_pl:
                 placeholder = "Haz una aclaración o escribe tus cambios..."
             elif st.session_state.esperando_conflictos:
                 placeholder = "Haz una aclaración o escribe tus cambios..."
+            elif st.session_state.get("clasificacion_activa"):
+                placeholder = "Haz una aclaración sobre la clasificación..."
             else:
                 placeholder = "Escríbele al agente..."
 
@@ -4795,6 +5448,7 @@ with tab_pl:
                 not st.session_state.esperando_dudas
                 and not st.session_state.esperando_duplicados
                 and not st.session_state.esperando_conflictos
+                and not st.session_state.get("clasificacion_activa")
                 and not st.session_state.get("agregar_lote_activo")
             )
             if _en_chat_principal and st.session_state.chat:
@@ -4854,6 +5508,34 @@ with tab_pl:
                                 respuesta = resp.content.strip()
                                 st.markdown(respuesta)
                                 st.session_state.chat_fase.append({"role": "assistant", "content": respuesta})
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                    st.rerun()
+
+                # ── Chat durante clasificación padre/variante ─────────────────────────
+                elif st.session_state.get("clasificacion_activa"):
+                    with st.chat_message("user"):
+                        st.markdown(user_input)
+                    st.session_state.chat_fase.append({"role": "user", "content": user_input})
+                    with st.chat_message("assistant"):
+                        with st.spinner("..."):
+                            try:
+                                system_clas = _build_system_fase(
+                                    "revisando la clasificación de productos (padres, variantes, duplicados)",
+                                    st.session_state.productos,
+                                    st.session_state.analisis,
+                                )
+                                lc_clas = [
+                                    HumanMessage(content=m["content"]) if m["role"] == "user"
+                                    else AIMessage(content=m["content"])
+                                    for m in st.session_state.chat_fase
+                                    if isinstance(m.get("content"), str)
+                                ]
+                                llm_clas = ChatAnthropic(model="claude-sonnet-4-6", max_tokens=800)
+                                resp_clas = llm_clas.invoke([SystemMessage(content=system_clas)] + lc_clas)
+                                respuesta_clas = resp_clas.content.strip()
+                                st.markdown(respuesta_clas)
+                                st.session_state.chat_fase.append({"role": "assistant", "content": respuesta_clas})
                             except Exception as e:
                                 st.error(f"Error: {e}")
                     st.rerun()

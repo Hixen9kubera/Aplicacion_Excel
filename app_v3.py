@@ -2576,7 +2576,7 @@ def generar_excel(productos: list[dict], tipo_cambio: float, contenedor: str) ->
         if cbm.value is not None:
             cbm.number_format = "0.000000"
         ws.cell(r, 5).value  = prod.get("precio_usd")
-        ws.cell(r, 6).value  = None
+        ws.cell(r, 6).value  = prod.get("piezas_total")   # col "Unidades"
         ws.cell(r, 7).value  = prod.get("piezas_x_caja")
         cbm_caja = ws.cell(r, 8)
         px = prod.get("piezas_x_caja")
@@ -4935,7 +4935,7 @@ def _agregar_productos_a_excel_ferraforme(excel_bytes: bytes,
             _cbm_cell.number_format = "0.000000"
 
         ws.cell(_r, 5).value = _np.get("precio_usd")
-        ws.cell(_r, 6).value = None
+        ws.cell(_r, 6).value = _np.get("piezas_total")    # col "Unidades"
 
         _px = _np.get("piezas_x_caja")
         ws.cell(_r, 7).value = _px

@@ -5017,52 +5017,102 @@ if st.session_state.get("clasificacion_activa"):
 
         st.divider()
 
-        # ── Tabla editable ────────────────────────────────────────────────────
-        import pandas as _pd
+        # ── Encabezados de columnas ───────────────────────────────────────────
+        _odoo_urls = st.session_state.get("odoo_imagen_urls", {})
+        _hc = st.columns([1, 1, 4, 2, 1, 2])
+        for _ht, _hcol in zip(
+            ["🖼️ Producto", "🏷️ Padre Odoo", "Nombre / SKU / Acción", "Atributo", "⚠️ Rev.", "Nota bodega"],
+            _hc,
+        ):
+            _hcol.markdown(f"**{_ht}**")
+        st.divider()
 
-        _df_data = []
-        for _prop in _props:
-            _prod_p = _prop["producto"]
-            _fila   = str((_prod_p.get("fila_excel_0idx") or 0) + 1)
-            _df_data.append({
-                "Fila":             _fila,
-                "Nombre":           _prop["nombre"],
-                "Nombre base":      _prop["nombre_base"],
-                "SKU propuesto":    _prop["sku"],
-                "SKU padre":        _prop["padre_sku"] or "—",
-                "Atributo":         (f"{_prop['atributo_tipo']} / {_prop['atributo_valor']}"
-                                     if _prop.get("atributo_tipo") and _prop.get("atributo_valor")
-                                     else "—"),
-                "Acción":           _prop["accion_display"],
-                "Padre en Odoo":    _prop["padre_odoo_nombre"] or "—",
-                "Requiere revisión": _prop.get("requiere_revision", False),
-                "Nota":             _prop.get("nota_revision", ""),
-            })
-        _df = _pd.DataFrame(_df_data)
+        # ── Fila por producto ─────────────────────────────────────────────────
+        _ACCION_COLOR = {
+            "crear_padre_y_variante": "🟦",
+            "crear_padre_solo":       "🟦",
+            "crear_variante":         "🟩",
+            "reutilizar":             "🟨",
+            "duplicado":              "🟥",
+        }
+        for _i, _prop in enumerate(_props):
+            _prod_p  = _prop["producto"]
+            _fila    = str((_prod_p.get("fila_excel_0idx") or 0) + 1)
+            _accion  = _prop["accion"]
+            _badge   = _ACCION_COLOR.get(_accion, "⬜")
+            _c_img, _c_padre, _c_info, _c_att, _c_rev, _c_nota = st.columns([1, 1, 4, 2, 1, 2])
 
-        _df_edited = st.data_editor(
-            _df,
-            use_container_width=True,
-            hide_index=True,
-            disabled=["Fila", "Nombre", "Nombre base", "SKU propuesto", "SKU padre",
-                      "Atributo", "Acción", "Padre en Odoo"],
-            column_config={
-                "Requiere revisión": st.column_config.CheckboxColumn(
-                    "⚠️ Rev.",
-                    help="Marca para que bodega lo revise manualmente",
-                    default=False,
-                ),
-                "Nota": st.column_config.TextColumn(
-                    "Nota para bodega",
-                    help="Observación opcional que aparecerá en el reporte",
-                    max_chars=200,
-                ),
-            },
-            key="tabla_clasificacion",
-        )
+            # ── Imagen del producto (del Excel) ───────────────────────────────
+            with _c_img:
+                _img_data = _prop.get("imagen_data")
+                if _img_data:
+                    try:
+                        st.image(_img_data, width=80, caption=f"F{_fila}")
+                    except Exception:
+                        st.caption(f"F{_fila}")
+                else:
+                    st.caption(f"F{_fila}\n_(sin img)_")
+
+            # ── Imagen del padre en Odoo ──────────────────────────────────────
+            with _c_padre:
+                _padre_url = None
+                if _prop.get("padre_fuente") == "odoo" and _prop.get("padre_sku"):
+                    _padre_url = _odoo_urls.get(_prop["padre_sku"])
+                    # También intentar con el SKU base (sin atributo) en caso de variante
+                    if not _padre_url:
+                        _partes_sku = _prop["padre_sku"].split("-")
+                        if len(_partes_sku) >= 2:
+                            _sku_base = "-".join(_partes_sku[:2])
+                            _padre_url = _odoo_urls.get(_sku_base)
+                if _padre_url:
+                    try:
+                        st.image(_padre_url, width=80, caption=_prop.get("padre_odoo_nombre", "")[:20])
+                    except Exception:
+                        st.caption(_prop.get("padre_odoo_nombre", "—"))
+                elif _prop.get("padre_fuente") == "local":
+                    st.caption("📋 Local\n(mismo PL)")
+                else:
+                    st.caption("—")
+
+            # ── Info del producto ─────────────────────────────────────────────
+            with _c_info:
+                st.markdown(
+                    f"**{_prop['nombre']}**  \n"
+                    f"Base: *{_prop['nombre_base']}*  \n"
+                    f"`{_prop['sku']}` {_badge} {_prop['accion_display']}"
+                )
+                if _prop.get("padre_sku") and _prop["padre_sku"] != _prop["sku"]:
+                    st.caption(f"Padre: `{_prop['padre_sku']}`")
+
+            # ── Atributo ──────────────────────────────────────────────────────
+            with _c_att:
+                if _prop.get("atributo_tipo") and _prop.get("atributo_valor"):
+                    st.caption(f"{_prop['atributo_tipo']}  \n**{_prop['atributo_valor']}**")
+                else:
+                    st.caption("—")
+
+            # ── Checkbox requiere revisión ────────────────────────────────────
+            with _c_rev:
+                st.checkbox(
+                    "",
+                    value=_prop.get("requiere_revision", False),
+                    key=f"_cls_rev_{_i}",
+                    label_visibility="collapsed",
+                )
+
+            # ── Nota ──────────────────────────────────────────────────────────
+            with _c_nota:
+                st.text_input(
+                    "",
+                    value=_prop.get("nota_revision", ""),
+                    key=f"_cls_nota_{_i}",
+                    placeholder="Observación...",
+                    label_visibility="collapsed",
+                )
+
+            st.divider()
 
         # ── Botones de acción ─────────────────────────────────────────────────
-        st.divider()
         _btn_c1, _btn_c2 = st.columns([3, 1])
         with _btn_c1:
             _confirmar = st.button(
@@ -5081,12 +5131,10 @@ if st.session_state.get("clasificacion_activa"):
                 )
 
         if _confirmar:
-            # Aplicar revisiones del editor a las propuestas
+            # Leer valores de los widgets individuales
             for _i, _prop in enumerate(_props):
-                if _i < len(_df_edited):
-                    _row = _df_edited.iloc[_i]
-                    _prop["requiere_revision"] = bool(_row.get("Requiere revisión", False))
-                    _prop["nota_revision"]     = str(_row.get("Nota", "") or "")
+                _prop["requiere_revision"] = bool(st.session_state.get(f"_cls_rev_{_i}", False))
+                _prop["nota_revision"]     = str(st.session_state.get(f"_cls_nota_{_i}", "") or "")
 
             # Generar reporte de clasificación (para bodega)
             _nombre_pl = st.session_state.get("filename", "")

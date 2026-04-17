@@ -3676,6 +3676,33 @@ with tab_pl:
                                     if item.get("text"):
                                         st.markdown(item["text"])
 
+    # ── Botones de descarga en área principal ────────────────────────────────────
+    _eb = st.session_state.get("excel_bytes")
+    _mb = st.session_state.get("master_bytes")
+    if _eb or _mb:
+        _fn = st.session_state.get("filename", "packing_list.xlsx").replace(".xlsx", "")
+        st.divider()
+        _dcols = st.columns(2)
+        with _dcols[0]:
+            if _eb:
+                st.download_button(
+                    label="⬇️ Descargar Excel FERRAFORME",
+                    data=_eb,
+                    file_name=f"{_fn}_FERRAFORME.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary",
+                )
+        with _dcols[1]:
+            if _mb:
+                st.download_button(
+                    label="⬇️ Descargar Excel Master Costos",
+                    data=_mb,
+                    file_name=f"{_fn}_MASTER.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
     # ── Snapshot de duplicados/variantes (editable, visible tras confirmar) ──
     _snap = st.session_state.get("dup_snapshot")
     if _snap and not st.session_state.get("esperando_duplicados"):
@@ -4809,7 +4836,7 @@ with tab_pl:
 
                                 st.markdown(texto)
                                 if st.session_state.excel_bytes != excel_antes:
-                                    st.success("Excel actualizado — descárgalo desde el panel izquierdo.")
+                                    st.success("Excel actualizado — usa los botones de descarga de abajo.")
 
                             except Exception as e:
                                 err = f"Error: {e}"

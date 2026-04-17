@@ -3520,8 +3520,40 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
             vals["description_sale"] = "\n".join(desc_partes)
         if notas:
             vals["description"] = "\n".join(notas)
+
+        # ── Pestaña Inventario / Empaque ──────────────────────────────────────
         if cbm_pz > 0:
-            vals["volume"] = cbm_pz           # pestaña Inventario
+            vals["volume"]          = cbm_pz       # Volume (m³) — Logistics
+            vals["cbm_per_product"] = cbm_pz       # CBM por producto
+        cbm_mc = _safe_float(prod.get("cbm_master_carton"))
+        if cbm_mc > 0:
+            vals["cbm_master_box"] = cbm_mc        # CBM por caja master
+        pzs_caja = prod.get("piezas_x_caja")
+        if pzs_caja:
+            try:
+                vals["units_per_master_box"] = int(float(pzs_caja))
+            except (ValueError, TypeError):
+                pass
+        if largo:
+            try:
+                vals["length"] = float(largo)
+            except (ValueError, TypeError):
+                pass
+        if ancho:
+            try:
+                vals["width"] = float(ancho)
+            except (ValueError, TypeError):
+                pass
+        if alto:
+            try:
+                vals["height"] = float(alto)
+            except (ValueError, TypeError):
+                pass
+        # Número de contenedor (campo texto)
+        _contenedor_num = st.session_state.get("contenedor_val", "")
+        if _contenedor_num:
+            vals["container_numbers"] = _contenedor_num
+
         if sku_direct:
             vals["default_code"] = sku_direct
         # Categoría

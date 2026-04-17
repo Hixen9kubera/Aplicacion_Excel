@@ -2928,6 +2928,66 @@ def generar_excel_master(productos: list[dict], tipo_cambio: float,
     return buf.read()
 
 
+PURCHASE_TEMPLATE_PATH = Path(__file__).parent / "Purchase.xlsx"
+
+
+def generar_excel_purchase(productos: list[dict], tipo_cambio: float,
+                           costo_contenedor: float) -> bytes:
+    """
+    Genera el Excel de Purchase Order a partir del template Purchase.xlsx.
+    Llena: PRODUCT (SKU), QUANTITY (piezas_total), DESCRIPTION, PRICE (costo_unitario).
+    Las columnas fijas (PURCHASE ID, SUPPLIER, CURRENCY, UOM, DATE) se toman del template.
+    """
+    # Pre-calcular costo_por_m³ igual que en generar_excel_master
+    cbm_total    = sum(_cbm_total_fila(p) for p in productos)
+    costo_por_m3 = costo_contenedor / cbm_total if cbm_total > 0 else 0.0
+
+    wb = openpyxl.load_workbook(PURCHASE_TEMPLATE_PATH)
+    ws = wb.active
+
+    # Leer valores fijos de la fila de ejemplo (fila 2) del template
+    _purchase_id = ws.cell(2, 1).value or ""
+    _supplier    = ws.cell(2, 2).value or EMPRESA
+    _currency    = ws.cell(2, 3).value or "MXN"
+    _uom         = ws.cell(2, 6).value or "Unidades"
+    _date        = ws.cell(2, 10).value
+
+    # Limpiar fila de ejemplo
+    for c in range(1, 11):
+        ws.cell(2, c).value = None
+
+    for i, prod in enumerate(productos):
+        r = 2 + i
+
+        precio_usd     = _safe_float(prod.get("precio_usd"))
+        precio_mxn     = round(precio_usd * tipo_cambio, 2)
+        cbm_pz         = _cbm_por_pieza(prod)
+        costo_cbm_pz   = round(cbm_pz * costo_por_m3, 2)
+        costo_unitario = round(precio_mxn + costo_cbm_pz, 2)
+
+        piezas_total = prod.get("piezas_total")
+        try:
+            piezas_total = int(float(piezas_total)) if piezas_total else None
+        except (ValueError, TypeError):
+            piezas_total = None
+
+        ws.cell(r, 1).value  = _purchase_id
+        ws.cell(r, 2).value  = _supplier
+        ws.cell(r, 3).value  = _currency
+        ws.cell(r, 4).value  = prod.get("sku", "")           # PRODUCT
+        ws.cell(r, 5).value  = piezas_total                  # QUANTITY
+        ws.cell(r, 6).value  = _uom
+        ws.cell(r, 7).value  = prod.get("descripcion", "")   # DESCRIPTION
+        ws.cell(r, 8).value  = costo_unitario if costo_unitario > 0 else None  # PRICE
+        ws.cell(r, 9).value  = None
+        ws.cell(r, 10).value = _date
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
 # ── Herramienta LangChain ──────────────────────────────────────────────────────
 @tool
 def generar_excel_tool(productos: List[dict] | None = None) -> str:
@@ -3028,6 +3088,7 @@ defaults = {
     "productos":         [],
     "excel_bytes":       None,
     "master_bytes":      None,
+    "purchase_bytes":    None,
     "archivo_id":        None,
     "dudas_relevantes":  [],
     "dudas_menores":     [],
@@ -3679,7 +3740,8 @@ with tab_pl:
     # ── Botones de descarga en área principal ────────────────────────────────────
     _eb = st.session_state.get("excel_bytes")
     _mb = st.session_state.get("master_bytes")
-    if _eb or _mb:
+    _pb = st.session_state.get("purchase_bytes")
+    if _eb or _mb or _pb:
         _fn = st.session_state.get("filename", "packing_list.xlsx").replace(".xlsx", "")
         st.divider()
         _dcols = st.columns(2)
@@ -3702,6 +3764,32 @@ with tab_pl:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+
+        # ── Purchase Order ────────────────────────────────────────────────────
+        if _eb and _mb:
+            _pcols = st.columns([1, 1])
+            with _pcols[0]:
+                if st.button("🛒 Crear Purchase", use_container_width=True,
+                             help="Genera el Excel de Purchase Order listo para importar a Odoo"):
+                    try:
+                        _prods_po    = st.session_state.get("productos", [])
+                        _tc_po       = st.session_state.get("tipo_cambio", 19.0)
+                        _cc_po       = st.session_state.get("costo_contenedor", 525000.0)
+                        _pb_new      = generar_excel_purchase(_prods_po, _tc_po, _cc_po)
+                        st.session_state.purchase_bytes = _pb_new
+                        st.rerun()
+                    except Exception as _e:
+                        st.error(f"Error al generar Purchase: {_e}")
+            with _pcols[1]:
+                if _pb:
+                    st.download_button(
+                        label="⬇️ Descargar Purchase Order",
+                        data=_pb,
+                        file_name=f"{_fn}_PURCHASE.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        type="primary",
+                    )
 
     # ── Snapshot de duplicados/variantes (editable, visible tras confirmar) ──
     _snap = st.session_state.get("dup_snapshot")

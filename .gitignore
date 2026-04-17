@@ -24,8 +24,9 @@ imagenes_temp/
 # Archivos Excel de datos / packing lists
 *.xlsx
 *.xls
-# Excepción: el template base de Ferraforme SÍ debe estar en el repo
+# Excepción: templates base SÍ deben estar en el repo
 !FORMULA FERRAFORME PRODUCTOS .xlsx
+!Purchase.xlsx
 
 # Carpeta de pruebas y scripts temporales
 pruebas/

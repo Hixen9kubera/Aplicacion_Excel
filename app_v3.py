@@ -3384,6 +3384,9 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                                  costo_contenedor: float) -> tuple[list[str], list[str]]:
     """
     Crea templates padre y variantes en Odoo según las propuestas confirmadas.
+    Llena: description_sale (material, uso, precio USD, dimensiones, piezas/caja),
+           description/notas internas (CBM, guía, cajas, flete), volume (inventario).
+    Respeta modo_prueba: nombre con sufijo _test y categoría PRUEBAS_AGENTE.
     Devuelve (resultados_ok, errores).
     """
     odoo_url  = os.environ.get("ODOO_URL", "")
@@ -3399,13 +3402,29 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
     except Exception as e:
         return [], [f"No se pudo conectar a ODOO: {e}"]
 
+    modo_prueba  = st.session_state.get("modo_prueba", False)
     cbm_total    = sum(_cbm_total_fila(p["producto"])
                        for p in propuestas if p["accion"] != "duplicado")
     costo_por_m3 = costo_contenedor / cbm_total if cbm_total > 0 else 0.0
 
+    # Categoría
+    cat_cache: dict[str, int] = {}
+    def _get_cat(nombre_cat: str) -> int | None:
+        if nombre_cat in cat_cache:
+            return cat_cache[nombre_cat]
+        try:
+            ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.category", "search",
+                                    [[["name", "=", nombre_cat]]])
+            cid = ids[0] if ids else models.execute_kw(
+                odoo_db, uid, odoo_pass, "product.category", "create", [{"name": nombre_cat}])
+            cat_cache[nombre_cat] = cid
+            return cid
+        except Exception:
+            return None
+
     templates_creados: dict[str, int] = {}  # sku_padre → tmpl_id
-    attrs_cache:       dict[str, int] = {}  # nombre_attr → attr_id
-    attr_vals_cache:   dict[tuple, int] = {}  # (attr_id, valor) → value_id
+    attrs_cache:       dict[str, int] = {}
+    attr_vals_cache:   dict[tuple, int] = {}
 
     def _get_or_create_attr(nombre: str) -> int:
         if nombre in attrs_cache:
@@ -3429,6 +3448,90 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
         attr_vals_cache[key] = vid
         return vid
 
+    def _build_vals(prod: dict, nombre_tmpl: str, precio_usd: float,
+                    precio_mxn: float, costo_unitario: float,
+                    sku_direct: str | None = None) -> dict:
+        """Construye el dict de valores para product.template con todos los campos."""
+        cbm_pz       = _cbm_por_pieza(prod)
+        costo_cbm_pz = round(cbm_pz * costo_por_m3, 2)
+        largo  = prod.get("largo_cm")
+        ancho  = prod.get("ancho_cm")
+        alto   = prod.get("alto_cm")
+        dims_str = (" × ".join(str(v) for v in [largo, ancho, alto] if v)
+                    if any([largo, ancho, alto]) else None)
+
+        # ── Descripción de venta (pestaña Ventas / visible al cliente) ─────────
+        desc_partes = []
+        if prod.get("descripcion"):
+            desc_partes.append(prod["descripcion"])
+        if prod.get("material"):
+            desc_partes.append(f"Material: {prod['material']}")
+        if prod.get("uso"):
+            desc_partes.append(f"Uso: {prod['uso']}")
+        if precio_usd > 0:
+            desc_partes.append(f"Precio USD: ${precio_usd:.2f}")
+        pzs = prod.get("piezas_x_caja")
+        if pzs:
+            try:
+                desc_partes.append(f"Piezas por caja: {int(float(pzs))}")
+            except (ValueError, TypeError):
+                desc_partes.append(f"Piezas por caja: {pzs}")
+        if dims_str:
+            desc_partes.append(f"Dimensiones: {dims_str} cm")
+
+        # ── Notas internas (pestaña Notas / internal notes) ────────────────────
+        notas = []
+        if prod.get("nombre_alt"):
+            notas.append(f"Nombre alternativo: {prod['nombre_alt']}")
+        if prod.get("id_guia"):
+            notas.append(f"ID Guía / Referencia: {prod['id_guia']}")
+        if prod.get("cajas_master"):
+            try:
+                notas.append(f"Cajas master: {int(float(prod['cajas_master']))}")
+            except (ValueError, TypeError):
+                notas.append(f"Cajas master: {prod['cajas_master']}")
+        if prod.get("piezas_total"):
+            try:
+                notas.append(f"Piezas totales en contenedor: {int(float(prod['piezas_total']))}")
+            except (ValueError, TypeError):
+                notas.append(f"Piezas totales en contenedor: {prod['piezas_total']}")
+        if cbm_pz > 0:
+            notas.append(f"CBM por pieza: {cbm_pz:.6f} m³")
+        if prod.get("cbm_master_carton"):
+            notas.append(f"CBM master carton: {prod['cbm_master_carton']}")
+        if prod.get("cbm_total_sku"):
+            notas.append(f"CBM total SKU: {prod['cbm_total_sku']}")
+        if prod.get("cbm_inner_carton"):
+            notas.append(f"CBM inner carton: {prod['cbm_inner_carton']}")
+        if dims_str:
+            notas.append(f"Dimensiones caja: {dims_str} cm")
+        if costo_cbm_pz > 0:
+            notas.append(f"Costo flete CBM/pieza: ${costo_cbm_pz:.4f} MXN")
+
+        vals: dict = {
+            "name":             nombre_tmpl,
+            "type":             "product",
+            "sale_ok":          True,
+            "purchase_ok":      True,
+            "list_price":       precio_mxn,
+            "standard_price":   costo_unitario,
+        }
+        if desc_partes:
+            vals["description_sale"] = "\n".join(desc_partes)
+        if notas:
+            vals["description"] = "\n".join(notas)
+        if cbm_pz > 0:
+            vals["volume"] = cbm_pz           # pestaña Inventario
+        if sku_direct:
+            vals["default_code"] = sku_direct
+        # Categoría
+        cat_nombre = "PRUEBAS_AGENTE" if modo_prueba else None
+        if cat_nombre:
+            cid = _get_cat(cat_nombre)
+            if cid:
+                vals["categ_id"] = cid
+        return vals
+
     resultados: list[str] = []
     errores:    list[str] = []
 
@@ -3445,19 +3548,29 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
         nombre         = prop["nombre"]
         precio_usd     = _safe_float(prod.get("precio_usd"))
         precio_mxn     = round(precio_usd * tipo_cambio, 2)
-        costo_unitario = round(precio_mxn + _cbm_por_pieza(prod) * costo_por_m3, 2)
+        cbm_pz         = _cbm_por_pieza(prod)
+        costo_unitario = round(precio_mxn + cbm_pz * costo_por_m3, 2)
+
+        # Nombre del template: sufijo _test en modo prueba
+        nombre_tmpl = nombre_base + ("_test" if modo_prueba else "")
+
         try:
             if accion in ("crear_padre_y_variante", "crear_padre_solo"):
-                vals = {"name": nombre_base, "type": "product",
-                        "sale_ok": True, "purchase_ok": True,
-                        "list_price": precio_mxn, "standard_price": costo_unitario}
-                if accion == "crear_padre_solo":
-                    vals["default_code"] = sku
+                sku_direct = sku if accion == "crear_padre_solo" else None
+                vals = _build_vals(prod, nombre_tmpl, precio_usd, precio_mxn,
+                                   costo_unitario, sku_direct=sku_direct)
                 tmpl_id = models.execute_kw(
                     odoo_db, uid, odoo_pass, "product.template", "create", [vals])
                 templates_creados[sku_padre] = tmpl_id
+
                 if accion == "crear_padre_solo":
-                    resultados.append(f"✅ Padre creado: `{sku}` — {nombre_base}")
+                    # Forzar standard_price en product.product
+                    pp_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.product",
+                                               "search", [[["product_tmpl_id", "=", tmpl_id]]])
+                    if pp_ids:
+                        models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
+                                          [pp_ids, {"standard_price": costo_unitario}])
+                    resultados.append(f"✅ Padre creado: `{sku}` — {nombre_tmpl}")
                 else:
                     attr_id = _get_or_create_attr(att_tipo)
                     val_id  = _get_or_create_val(attr_id, att_valor)
@@ -3472,7 +3585,7 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                         models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
                                           [var_ids, {"default_code": sku,
                                                      "standard_price": costo_unitario}])
-                    resultados.append(f"✅ Padre + variante: `{sku_padre}` / `{sku}` — {nombre}")
+                    resultados.append(f"✅ Padre + variante: `{sku_padre}` / `{sku}` — {nombre_tmpl}")
 
             elif accion == "crear_variante":
                 tmpl_id = (templates_creados.get(sku_padre)
@@ -5136,15 +5249,24 @@ if st.session_state.get("clasificacion_activa"):
                 _prop["requiere_revision"] = bool(st.session_state.get(f"_cls_rev_{_i}", False))
                 _prop["nota_revision"]     = str(st.session_state.get(f"_cls_nota_{_i}", "") or "")
 
-            # Generar reporte de clasificación (para bodega)
+            # ── Crear padres y variantes en Odoo ─────────────────────────────
+            _odoo_ok = st.session_state.get("odoo_conectado", False)
+            _res_odoo: list[str] = []
+            _err_odoo: list[str] = []
+            if _odoo_ok:
+                with st.spinner("Creando productos en Odoo..."):
+                    _res_odoo, _err_odoo = crear_clasificacion_en_odoo(
+                        _props, tipo_cambio,
+                        st.session_state.get("costo_contenedor", 525000.0),
+                    )
+
+            # ── Generar reporte de clasificación (para bodega) ────────────────
             _nombre_pl = st.session_state.get("filename", "")
             _reporte_bytes = generar_reporte_clasificacion(_props, _nombre_pl)
             st.session_state.clasificacion_reporte_bytes = _reporte_bytes
 
-            # Contar cuántos requieren revisión
+            # ── Mensaje resumen en el chat ────────────────────────────────────
             _n_rev = sum(1 for p in _props if p["requiere_revision"])
-
-            # Mensaje resumen en el chat
             _res_lines = [f"**Clasificación confirmada — {_n_props} producto(s)**"]
             _acc_display = {
                 "crear_padre_y_variante": "🆕 Padre nuevo + variante nueva",
@@ -5157,7 +5279,18 @@ if st.session_state.get("clasificacion_activa"):
                 if _cnt:
                     _res_lines.append(f"- {_acc_display.get(_acc, _acc)}: **{_cnt}**")
             if _n_rev:
-                _res_lines.append(f"\n⚠️ **{_n_rev} producto(s) marcados para revisión en bodega** — incluidos en el reporte.")
+                _res_lines.append(
+                    f"\n⚠️ **{_n_rev} producto(s) marcados para revisión** — incluidos en el reporte.")
+            if _res_odoo:
+                _res_lines.append(f"\n**Odoo ({len(_res_odoo)} creados):**")
+                _res_lines.extend(_res_odoo[:10])  # máx 10 líneas para no saturar el chat
+                if len(_res_odoo) > 10:
+                    _res_lines.append(f"  … y {len(_res_odoo) - 10} más.")
+            if _err_odoo:
+                _res_lines.append(f"\n**Errores Odoo ({len(_err_odoo)}):**")
+                _res_lines.extend(_err_odoo[:5])
+            elif not _odoo_ok:
+                _res_lines.append("\n⚠️ Odoo no conectado — productos no creados en el sistema.")
 
             st.session_state.chat.append({"role": "assistant", "content": "\n".join(_res_lines)})
 

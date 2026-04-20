@@ -224,7 +224,7 @@ encabezados de columna de la tabla de productos (la fila que dice cosas como "De
 Los encabezados pueden estar en cualquier idioma (chino, inglés, español, etc.).
 
 Campos a identificar (índice base 0):
-nombre_producto, nombre_producto_alt, id_guia, cajas_master, piezas_x_caja, piezas_total, cbm_por_pieza, cbm_master_carton, cbm_total_sku, precio_usd, largo_cm, ancho_cm, alto_cm, material, uso
+nombre_producto, nombre_producto_alt, id_guia, cajas_master, piezas_x_caja, piezas_total, cbm_por_pieza, cbm_master_carton, cbm_total_sku, precio_usd, largo_cm, ancho_cm, alto_cm, peso_kg, volumen_por_pieza, material, uso
 
 IMPORTANTE para columnas CBM — usa los valores numéricos de las filas de muestra para inferir correctamente:
 
@@ -268,6 +268,8 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
     "largo_cm":            {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": ""}},
     "ancho_cm":            {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": ""}},
     "alto_cm":             {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": ""}},
+    "peso_kg":             {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": "peso en kg por pieza o por caja (especificar en nota)"}},
+    "volumen_por_pieza":   {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": "volumen por pieza en m³, si viene separado del CBM"}},
     "cbm_por_pieza":       {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": "CBM de una pieza individual"}},
     "cbm_master_carton":   {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": "CBM de una caja/master carton completa"}},
     "cbm_total_sku":       {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": "CBM total de todas las unidades de este SKU"}},
@@ -411,6 +413,8 @@ def leer_productos(file_bytes: bytes, columnas: dict, fila_encabezado: int = 1) 
             "cbm_master_carton": val("cbm_master_carton"),
             "cbm_total_sku":     val("cbm_total_sku"),
             "precio_usd":        val("precio_usd"),
+            "peso_kg":           val("peso_kg"),
+            "volumen_por_pieza": val("volumen_por_pieza"),
             "material":          val("material") or "",
             "uso":               val("uso") or "",
             # Fila original del Excel (0-indexed) para emparejar con imágenes extraídas
@@ -422,6 +426,7 @@ def leer_productos(file_bytes: bytes, columnas: dict, fila_encabezado: int = 1) 
             "cajas_master", "piezas_x_caja", "piezas_total",
             "cbm_por_pieza", "cbm_master_carton", "cbm_total_sku",
             "precio_usd", "largo_cm", "ancho_cm", "alto_cm",
+            "peso_kg", "volumen_por_pieza",
         )
         for _cn in _CAMPOS_NUM:
             _v = prod.get(_cn)
@@ -1531,18 +1536,19 @@ def _sincronizar_a_supabase(prods_odoo: list[dict]) -> dict:
     if not sb:
         return {"phashes": phashes, "imagen_urls": imagen_urls}
 
-    rows_to_upsert = []
     bucket = sb.storage.from_("odoo-imagenes")
+
+    # Calcular phashes primero (local, sin red)
+    rows_to_upsert = []
+    prods_con_img  = []
     for p in prods_odoo:
         sku    = p.get("default_code", "")
         nombre = p.get("name", "")
         if not sku:
             continue
-
         phash_hex  = None
-        imagen_url = None
         img_b64    = p.get("image_128")
-
+        img_bytes  = None
         if img_b64:
             try:
                 img_bytes = base64.b64decode(img_b64)
@@ -1550,22 +1556,31 @@ def _sincronizar_a_supabase(prods_odoo: list[dict]) -> dict:
                 if ph is not None:
                     phash_hex    = str(ph)
                     phashes[sku] = ph
-                bucket.upload(
-                    f"{sku}.png",
-                    img_bytes,
-                    {"content-type": "image/png", "x-upsert": "true"},
-                )
-                imagen_url       = bucket.get_public_url(f"{sku}.png")
-                imagen_urls[sku] = imagen_url
             except Exception:
                 pass
+        rows_to_upsert.append({"sku": sku, "nombre": nombre,
+                                "phash_hex": phash_hex, "imagen_url": None})
+        if img_bytes:
+            prods_con_img.append((sku, img_bytes))
 
-        rows_to_upsert.append({
-            "sku":        sku,
-            "nombre":     nombre,
-            "phash_hex":  phash_hex,
-            "imagen_url": imagen_url,
-        })
+    # Subir imágenes en paralelo (20 workers)
+    def _upload_img(args):
+        sku, img_bytes = args
+        try:
+            bucket.upload(f"{sku}.png", img_bytes,
+                          {"content-type": "image/png", "x-upsert": "true"})
+            return sku, bucket.get_public_url(f"{sku}.png")
+        except Exception:
+            return sku, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        for sku, url in ex.map(_upload_img, prods_con_img):
+            if url:
+                imagen_urls[sku] = url
+
+    # Actualizar imagen_url en rows antes del upsert
+    for row in rows_to_upsert:
+        row["imagen_url"] = imagen_urls.get(row["sku"])
 
     # Upsert en batches de 100
     try:
@@ -2094,14 +2109,14 @@ def renombrar_imagenes_con_sku(productos: list[dict]) -> tuple[int, list[str]]:
 
 
 def _reportar_subida_imagenes(subidas: list[str], errores: list[str]) -> None:
-    """Agrega al chat un resumen de productos creados en ODOO: éxitos y fallos."""
+    """Agrega al chat un resumen de imágenes subidas a productos en ODOO."""
     lineas = []
     if subidas:
-        lineas.append(f"**Productos creados en ODOO ({len(subidas)}):**")
+        lineas.append(f"**Imágenes subidas a Odoo ({len(subidas)}):**")
         for sku in subidas:
             lineas.append(f"- ✅ `{sku}`")
     if errores:
-        lineas.append(f"\n**Problemas en subida a ODOO ({len(errores)}):**")
+        lineas.append(f"\n**Problemas al subir imágenes ({len(errores)}):**")
         for e in errores:
             lineas.append(f"- ❌ {e}")
     if lineas:
@@ -2292,9 +2307,9 @@ def _subir_productos_a_odoo(productos: list[dict],
                              tipo_cambio: float,
                              costo_por_m3: float) -> tuple[list[str], list[str]]:
     """
-    Crea productos en ODOO leyendo las imágenes de IMAGENES_TEMP_PATH.
-    Elimina las imágenes temporales tras crearlos exitosamente.
-    Devuelve (skus_creados, errores).
+    Sube imágenes a productos YA EXISTENTES en Odoo (buscados por SKU).
+    No crea productos nuevos — la creación ocurrió al confirmar la clasificación.
+    Devuelve (skus_actualizados, errores).
     """
     subidas: list[str] = []
     errores: list[str] = []
@@ -2308,7 +2323,7 @@ def _subir_productos_a_odoo(productos: list[dict],
     odoo_pass = os.environ.get("ODOO_PASSWORD", "")
 
     if not all([odoo_url, odoo_db, odoo_user, odoo_pass]):
-        return subidas, ["Faltan credenciales ODOO en .env — productos no creados en ODOO"]
+        return subidas, ["Faltan credenciales ODOO en .env — imágenes no subidas"]
 
     try:
         common = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True)
@@ -2320,7 +2335,6 @@ def _subir_productos_a_odoo(productos: list[dict],
         return subidas, [f"No se pudo conectar a ODOO: {e}"]
 
     prod_por_sku = {p.get("sku"): p for p in productos if p.get("sku")}
-    cat_cache    = {}
 
     for archivo in list(IMAGENES_TEMP_PATH.iterdir()):
         if not archivo.is_file():
@@ -2334,16 +2348,34 @@ def _subir_productos_a_odoo(productos: list[dict],
             errores.append(f"No se pudo leer imagen '{archivo.name}': {e}")
             continue
 
-        err = _crear_producto_en_odoo(
-            prod_por_sku[sku], image_data,
-            uid, models_proxy, odoo_db, odoo_pass, cat_cache,
-            tipo_cambio=tipo_cambio,
-            costo_por_m3=costo_por_m3,
-        )
-        if err:
-            errores.append(err)
-        else:
+        try:
+            # Buscar producto existente por SKU (default_code en product.product o product.template)
+            tmpl_ids = models_proxy.execute_kw(
+                odoo_db, uid, odoo_pass, "product.template", "search",
+                [[["default_code", "=", sku]]])
+            if not tmpl_ids:
+                # Buscar también en product.product (variante con ese SKU)
+                var_ids = models_proxy.execute_kw(
+                    odoo_db, uid, odoo_pass, "product.product", "search",
+                    [[["default_code", "=", sku]]])
+                if var_ids:
+                    var_data = models_proxy.execute_kw(
+                        odoo_db, uid, odoo_pass, "product.product", "read",
+                        [var_ids[:1]], {"fields": ["product_tmpl_id"]})
+                    tmpl_ids = [var_data[0]["product_tmpl_id"][0]] if var_data else []
+
+            if not tmpl_ids:
+                errores.append(f"SKU `{sku}` no encontrado en Odoo — imagen no subida")
+                continue
+
+            img_b64 = base64.b64encode(image_data).decode("utf-8")
+            models_proxy.execute_kw(
+                odoo_db, uid, odoo_pass, "product.template", "write",
+                [tmpl_ids[:1], {"image_1920": img_b64}])
             subidas.append(sku)
+
+        except Exception as e:
+            errores.append(f"Error al subir imagen para `{sku}`: {e}")
 
     return subidas, errores
 
@@ -3425,6 +3457,20 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
     templates_creados: dict[str, int] = {}  # sku_padre → tmpl_id
     attrs_cache:       dict[str, int] = {}
     attr_vals_cache:   dict[tuple, int] = {}
+    tags_cache:        dict[str, int] = {}
+
+    def _get_or_create_tag(nombre: str) -> int | None:
+        if nombre in tags_cache:
+            return tags_cache[nombre]
+        try:
+            ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.tag", "search",
+                                    [[["name", "=", nombre]]])
+            tid = ids[0] if ids else models.execute_kw(
+                odoo_db, uid, odoo_pass, "product.tag", "create", [{"name": nombre}])
+            tags_cache[nombre] = tid
+            return tid
+        except Exception:
+            return None
 
     def _get_or_create_attr(nombre: str) -> int:
         if nombre in attrs_cache:
@@ -3522,9 +3568,16 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
             vals["description"] = "\n".join(notas)
 
         # ── Pestaña Inventario / Empaque ──────────────────────────────────────
-        if cbm_pz > 0:
-            vals["volume"]          = cbm_pz       # Volume (m³) — Logistics
-            vals["cbm_per_product"] = cbm_pz       # CBM por producto
+        # volume: preferir volumen_por_pieza si viene explícito, si no usar cbm_pz
+        vol_pz = _safe_float(prod.get("volumen_por_pieza")) or cbm_pz
+        if vol_pz > 0:
+            vals["volume"]          = vol_pz
+            vals["cbm_per_product"] = vol_pz
+        peso = _safe_float(prod.get("peso_kg"))
+        if peso > 0:
+            vals["weight"] = peso
+        if precio_usd > 0:
+            vals["costo_usd"] = precio_usd
         cbm_mc = _safe_float(prod.get("cbm_master_carton"))
         if cbm_mc > 0:
             vals["cbm_master_box"] = cbm_mc        # CBM por caja master
@@ -3556,22 +3609,38 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
 
         if sku_direct:
             vals["default_code"] = sku_direct
-        # Categoría
-        cat_nombre = "PRUEBAS_AGENTE" if modo_prueba else None
-        if cat_nombre:
-            cid = _get_cat(cat_nombre)
-            if cid:
-                vals["categ_id"] = cid
+        # Categoría: prueba → PRUEBAS_AGENTE, producción → Productos Agente
+        cat_nombre = "PRUEBAS_AGENTE" if modo_prueba else "Productos Agente"
+        cid = _get_cat(cat_nombre)
+        if cid:
+            vals["categ_id"] = cid
         return vals
+
+    def _apply_rev_tag_and_note(tmpl_id: int, nota: str) -> None:
+        tag_id = _get_or_create_tag("Requiere Revisión")
+        update: dict = {}
+        if tag_id:
+            update["tag_ids"] = [(4, tag_id)]
+        if nota:
+            existing = models.execute_kw(
+                odoo_db, uid, odoo_pass, "product.template", "read",
+                [[tmpl_id]], {"fields": ["description"]})
+            prev = (existing[0].get("description") or "") if existing else ""
+            update["description"] = f"⚠️ REQUIERE REVISIÓN: {nota}\n{prev}".strip()
+        if update:
+            models.execute_kw(odoo_db, uid, odoo_pass,
+                              "product.template", "write", [[tmpl_id], update])
 
     resultados: list[str] = []
     errores:    list[str] = []
 
     for prop in propuestas:
-        if prop["requiere_revision"] or prop["accion"] == "duplicado":
+        if prop["accion"] == "duplicado":
             continue
         prod           = prop["producto"]
         accion         = prop["accion"]
+        requiere_rev   = bool(prop.get("requiere_revision", False))
+        nota_rev       = str(prop.get("nota_revision", "") or "")
         sku            = prop["sku"]
         sku_padre      = prop["padre_sku"]
         att_tipo       = prop["atributo_tipo"] or "Variante"
@@ -3588,12 +3657,17 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
 
         try:
             if accion in ("crear_padre_y_variante", "crear_padre_solo"):
-                sku_direct = sku if accion == "crear_padre_solo" else None
+                # Para padre+variante: poner sku_padre en default_code del template
+                # Para padre solo: poner el sku directamente
+                sku_direct = sku_padre if accion == "crear_padre_y_variante" else sku
                 vals = _build_vals(prod, nombre_tmpl, precio_usd, precio_mxn,
                                    costo_unitario, sku_direct=sku_direct)
                 tmpl_id = models.execute_kw(
                     odoo_db, uid, odoo_pass, "product.template", "create", [vals])
                 templates_creados[sku_padre] = tmpl_id
+
+                if requiere_rev:
+                    _apply_rev_tag_and_note(tmpl_id, nota_rev)
 
                 if accion == "crear_padre_solo":
                     # Forzar standard_price en product.product
@@ -3602,7 +3676,8 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                     if pp_ids:
                         models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
                                           [pp_ids, {"standard_price": costo_unitario}])
-                    resultados.append(f"✅ Padre creado: `{sku}` — {nombre_tmpl}")
+                    _rev_sfx = " ⚠️ rev" if requiere_rev else ""
+                    resultados.append(f"✅ Padre creado: `{sku}` — {nombre_tmpl}{_rev_sfx}")
                 else:
                     attr_id = _get_or_create_attr(att_tipo)
                     val_id  = _get_or_create_val(attr_id, att_valor)
@@ -3610,6 +3685,19 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                                       "product.template.attribute.line", "create",
                                       [{"product_tmpl_id": tmpl_id, "attribute_id": attr_id,
                                         "value_ids": [(4, val_id)]}])
+                    # Re-write volume/weight/costo_usd: Odoo puede resetearlos al crear variantes
+                    _rewrite: dict = {}
+                    _vol_pz = _safe_float(prod.get("volumen_por_pieza")) or cbm_pz
+                    if _vol_pz > 0:
+                        _rewrite["volume"] = _vol_pz
+                    _peso = _safe_float(prod.get("peso_kg"))
+                    if _peso > 0:
+                        _rewrite["weight"] = _peso
+                    if precio_usd > 0:
+                        _rewrite["costo_usd"] = precio_usd
+                    if _rewrite:
+                        models.execute_kw(odoo_db, uid, odoo_pass,
+                                          "product.template", "write", [[tmpl_id], _rewrite])
                     var_ids = models.execute_kw(odoo_db, uid, odoo_pass,
                                                 "product.product", "search",
                                                 [[["product_tmpl_id", "=", tmpl_id]]])
@@ -3617,7 +3705,8 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                         models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
                                           [var_ids, {"default_code": sku,
                                                      "standard_price": costo_unitario}])
-                    resultados.append(f"✅ Padre + variante: `{sku_padre}` / `{sku}` — {nombre_tmpl}")
+                    _rev_sfx = " ⚠️ rev" if requiere_rev else ""
+                    resultados.append(f"✅ Padre + variante: `{sku_padre}` / `{sku}` — {nombre_tmpl}{_rev_sfx}")
 
             elif accion == "crear_variante":
                 tmpl_id = (templates_creados.get(sku_padre)
@@ -3649,7 +3738,10 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                     models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
                                       [var_ids, {"default_code": sku,
                                                  "standard_price": costo_unitario}])
-                resultados.append(f"✅ Variante creada: `{sku}` — {nombre}")
+                if requiere_rev:
+                    _apply_rev_tag_and_note(tmpl_id, nota_rev)
+                _rev_sfx = " ⚠️ rev" if requiere_rev else ""
+                resultados.append(f"✅ Variante creada: `{sku}` — {nombre}{_rev_sfx}")
 
             elif accion == "reutilizar":
                 resultados.append(f"♻️ Reutilizado: `{sku}` — {nombre}")
@@ -3869,20 +3961,21 @@ with st.sidebar:
 
         # 1. Intentar Supabase primero (salvo recarga forzada)
         if not forzar:
+            # 1a. pkl local primero (instantáneo)
+            cache = cargar_cache_odoo()
+            if cache:
+                _aplicar_datos_odoo(
+                    cache["skus"], cache["productos"], cache["phashes"],
+                    desde_cache=True,
+                )
+                return
+            # 1b. Supabase como fallback (cuando no hay pkl — ej. Digital Ocean)
             with st.spinner("Cargando desde Supabase..."):
                 sb_data = _cargar_desde_supabase()
             if sb_data:
                 _aplicar_datos_odoo(
                     sb_data["skus"], sb_data["productos"], sb_data["phashes"],
                     imagen_urls=sb_data["imagen_urls"], desde_cache=True,
-                )
-                return
-            # Fallback: cache local pkl
-            cache = cargar_cache_odoo()
-            if cache:
-                _aplicar_datos_odoo(
-                    cache["skus"], cache["productos"], cache["phashes"],
-                    desde_cache=True,
                 )
                 return
 
@@ -3924,7 +4017,9 @@ with st.sidebar:
         _cargar_desde_odoo(forzar=True)
 
     if st.session_state.odoo_conectado:
-        st.caption(f"✅ ODOO activo — {len(st.session_state.odoo_skus)} SKUs en sesión")
+        st.success(f"✅ ODOO activo — {len(st.session_state.odoo_skus)} SKUs en sesión")
+    else:
+        st.warning("⚠️ ODOO no conectado — presiona **Cargar SKUs**")
 
     # ── Limpiar productos _test ────────────────────────────────────────────────
     if st.button("🗑️ Eliminar productos _test", width="stretch",
@@ -5145,6 +5240,17 @@ if st.session_state.get("clasificacion_activa"):
             "Marca **Requiere revisión** en los que quieras que bodega revise manualmente."
         )
 
+        # ── Estado de Odoo y modo prueba ──────────────────────────────────────
+        _cls_odoo_ok = st.session_state.get("odoo_conectado", False)
+        _cls_prueba  = st.session_state.get("modo_prueba", False)
+        if _cls_odoo_ok:
+            if _cls_prueba:
+                st.info("🧪 **Modo prueba activado** — al confirmar se crearán productos con sufijo `_test` en categoría `PRUEBAS_AGENTE`")
+            else:
+                st.success("✅ **Odoo conectado** — al confirmar se crearán los productos en Odoo")
+        else:
+            st.warning("⚠️ **Odoo no conectado** — al confirmar solo se generará el reporte, no se crearán productos en Odoo")
+
         # ── Resumen rápido ────────────────────────────────────────────────────
         _acc_counts: dict[str, int] = {}
         for _p in _props:
@@ -5312,7 +5418,7 @@ if st.session_state.get("clasificacion_activa"):
                     _res_lines.append(f"- {_acc_display.get(_acc, _acc)}: **{_cnt}**")
             if _n_rev:
                 _res_lines.append(
-                    f"\n⚠️ **{_n_rev} producto(s) marcados para revisión** — incluidos en el reporte.")
+                    f"\n⚠️ **{_n_rev} producto(s) marcados para revisión** — creados en Odoo con tag 'Requiere Revisión' e incluidos en el reporte.")
             if _res_odoo:
                 _res_lines.append(f"\n**Odoo ({len(_res_odoo)} creados):**")
                 _res_lines.extend(_res_odoo[:10])  # máx 10 líneas para no saturar el chat

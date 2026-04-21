@@ -13,6 +13,8 @@ import io
 import os
 import re
 import json
+import math
+import time
 import pickle
 import zipfile
 import base64
@@ -1957,7 +1959,7 @@ TODOS los campos son obligatorios y nunca pueden quedar vacíos.{ctx_bloque}
 Solo JSON, sin texto adicional."""
 
     try:
-        import anthropic, time
+        import anthropic
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
         img_b64 = base64.b64encode(image_data).decode("utf-8")
         resp = None
@@ -3164,6 +3166,15 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         guardar_imagenes_temp(imagenes, productos)
 
     # ── Paso 1: Claude Vision por producto ────────────────────────────────────
+    # Fórmula de bloques: floor(rate_limit / tokens_por_llamada × 0.8)
+    # 30,000 tokens/min ÷ 2,000 tokens/llamada × 0.8 margen = 12 llamadas/bloque
+    _RATE_LIMIT   = 30_000
+    _TOKENS_CALL  = 2_000
+    _BLOQUE_SIZE  = max(1, int(_RATE_LIMIT / _TOKENS_CALL * 0.8))  # = 12
+    _n_con_img    = sum(1 for p in productos if imagenes.get(p.get("fila_excel_0idx", 0)))
+    _num_bloques  = max(1, math.ceil(_n_con_img / _BLOQUE_SIZE))
+    _llamadas_bloque = 0
+
     datos_vision: dict[int, dict] = {}
     for i, prod in enumerate(productos):
         row_num = prod.get("fila_excel_0idx", i + 1)
@@ -3172,6 +3183,11 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
             ctx   = {"nombre": prod.get("nombre"), "material": prod.get("material"),
                      "uso": prod.get("uso")}
             datos = analizar_imagen_claude(img["data"], img["ext"], ctx)
+            _llamadas_bloque += 1
+            # Pausa entre bloques para no exceder el rate limit
+            if _llamadas_bloque >= _BLOQUE_SIZE and i < len(productos) - 1:
+                time.sleep(62)
+                _llamadas_bloque = 0
         else:
             datos = _inferir_categoria_manual(
                 prod.get("nombre", ""), prod.get("material", ""), prod.get("uso", "")

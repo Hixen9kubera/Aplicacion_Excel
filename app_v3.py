@@ -3195,7 +3195,6 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         datos   = datos_vision[i]
         clas    = clasificaciones[i] if i < len(clasificaciones) else {}
         row_num = prod.get("fila_excel_0idx", i + 1)
-        img     = imagenes.get(row_num)
         nombre      = prod.get("nombre") or f"Producto {i+1}"
         nombre_base = (clas.get("nombre_base") or nombre).strip()
         att_tipo    = clas.get("atributo_tipo")

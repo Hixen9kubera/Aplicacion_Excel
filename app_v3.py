@@ -258,6 +258,7 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
 {{
   "idioma_detectado": "...",
   "fila_encabezado": 1,
+  "numero_contenedor": "",
   "columnas": {{
     "nombre_producto":     {{"indice": 0,    "encabezado_original": "...", "valor_muestra": "...", "confianza": "alta",          "nota": ""}},
     "nombre_producto_alt": {{"indice": null,  "encabezado_original": "",    "valor_muestra": "",    "confianza": "no_encontrado", "nota": "nombre en otro idioma, si existe"}},
@@ -300,6 +301,13 @@ NOTA sobre fila_encabezado:
 - Si hay filas de información de empresa/embarque antes de la tabla, identifica la fila correcta.
 - Los índices de columnas en "columnas" son SIEMPRE base 0 contando desde la izquierda del Excel,
   independientemente de en qué fila estén los encabezados.
+
+NOTA sobre numero_contenedor:
+- Busca en las filas previas a fila_encabezado (metadata del embarque) un número de contenedor.
+- Patrones comunes: "Container No:", "CONT#", "Container:", "Contenedor:", "CTR", o un código
+  alfanumérico que empiece con letras y tenga 11 caracteres (ej: TCKU1234567, MSCU9876543).
+- Si encuentras más de uno, ponlos separados por coma.
+- Si no encuentras ninguno, deja el campo vacío ("").
 
 TIPOS DE DUDA RELEVANTE:
 - "eleccion": el usuario debe elegir entre varias opciones (ej: qué columna usar cuando hay duplicados).
@@ -4420,6 +4428,10 @@ if archivo is not None:
                     st.session_state.chat.append({"role": "assistant", "content": msg_analisis})
                 else:
                     # Sin dudas relevantes → leer productos y arrancar chat directamente
+                    # Auto-rellenar número de contenedor si el sidebar está vacío
+                    _cont_excel = analisis.get("numero_contenedor", "")
+                    if _cont_excel and not st.session_state.get("contenedor_val", ""):
+                        st.session_state.contenedor_val = _cont_excel
                     if not st.session_state.odoo_conectado:
                         st.session_state.chat.append({
                             "role": "assistant",
@@ -4744,6 +4756,11 @@ if st.session_state.esperando_dudas:
                 analisis_actualizado = {**analisis, "columnas": columnas_actualizadas}
                 st.session_state.analisis        = analisis_actualizado
                 st.session_state.esperando_dudas = False
+
+                # Auto-rellenar número de contenedor si el sidebar está vacío
+                _cont_excel = analisis_actualizado.get("numero_contenedor", "")
+                if _cont_excel and not st.session_state.get("contenedor_val", ""):
+                    st.session_state.contenedor_val = _cont_excel
 
                 # Leer productos, enriquecer con imágenes y arrancar chat
                 productos, advertencias = leer_productos(

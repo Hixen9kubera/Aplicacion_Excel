@@ -1957,20 +1957,28 @@ TODOS los campos son obligatorios y nunca pueden quedar vacíos.{ctx_bloque}
 Solo JSON, sin texto adicional."""
 
     try:
-        import anthropic
+        import anthropic, time
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
         img_b64 = base64.b64encode(image_data).decode("utf-8")
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=512,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
-                    {"type": "text",  "text": prompt},
-                ],
-            }],
-        )
+        resp = None
+        for _intento in range(4):
+            try:
+                resp = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=512,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
+                            {"type": "text",  "text": prompt},
+                        ],
+                    }],
+                )
+                break
+            except anthropic.RateLimitError:
+                if _intento == 3:
+                    raise
+                time.sleep(15 * (2 ** _intento))  # 15s, 30s, 60s
         texto = resp.content[0].text.strip()
         if texto.startswith("```"):
             partes = texto.split("```")

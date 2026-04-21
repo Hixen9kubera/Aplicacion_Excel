@@ -3166,34 +3166,38 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         guardar_imagenes_temp(imagenes, productos)
 
     # ── Paso 1: Claude Vision por producto ────────────────────────────────────
-    # Fórmula de bloques: floor(rate_limit / tokens_por_llamada × 0.8)
-    # 30,000 tokens/min ÷ 2,000 tokens/llamada × 0.8 margen = 12 llamadas/bloque
-    _RATE_LIMIT   = 30_000
-    _TOKENS_CALL  = 2_000
-    _BLOQUE_SIZE  = max(1, int(_RATE_LIMIT / _TOKENS_CALL * 0.8))  # = 12
-    _n_con_img    = sum(1 for p in productos if imagenes.get(p.get("fila_excel_0idx", 0)))
-    _num_bloques  = max(1, math.ceil(_n_con_img / _BLOQUE_SIZE))
-    _llamadas_bloque = 0
+    # Fórmula: floor(30000 / 2000 × 0.8) = 12 llamadas por bloque
+    # Dentro de cada bloque se procesan en paralelo; entre bloques se pausa 62s
+    _RATE_LIMIT  = 30_000
+    _TOKENS_CALL = 2_000
+    _BLOQUE_SIZE = max(1, int(_RATE_LIMIT / _TOKENS_CALL * 0.8))  # = 12
 
-    datos_vision: dict[int, dict] = {}
-    for i, prod in enumerate(productos):
+    def _procesar_producto(args):
+        i, prod = args
         row_num = prod.get("fila_excel_0idx", i + 1)
         img     = imagenes.get(row_num)
         if img:
             ctx   = {"nombre": prod.get("nombre"), "material": prod.get("material"),
                      "uso": prod.get("uso")}
             datos = analizar_imagen_claude(img["data"], img["ext"], ctx)
-            _llamadas_bloque += 1
-            # Pausa entre bloques para no exceder el rate limit
-            if _llamadas_bloque >= _BLOQUE_SIZE and i < len(productos) - 1:
-                time.sleep(62)
-                _llamadas_bloque = 0
         else:
             datos = _inferir_categoria_manual(
                 prod.get("nombre", ""), prod.get("material", ""), prod.get("uso", "")
             )
             datos.setdefault("atributo_desc", datos.get("atributo_cod", ""))
-        datos_vision[i] = datos
+        return i, datos
+
+    datos_vision: dict[int, dict] = {}
+    bloques = [list(enumerate(productos))[j: j + _BLOQUE_SIZE]
+               for j in range(0, len(productos), _BLOQUE_SIZE)]
+
+    for b_idx, bloque in enumerate(bloques):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_BLOQUE_SIZE) as ex:
+            for i, datos in ex.map(_procesar_producto, bloque):
+                datos_vision[i] = datos
+        # Pausa entre bloques (no después del último)
+        if b_idx < len(bloques) - 1:
+            time.sleep(62)
 
     # Liberar bytes de imágenes — ya están en disco y ya se usaron para Vision
     del imagenes

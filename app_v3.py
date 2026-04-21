@@ -2068,6 +2068,7 @@ def guardar_imagenes_temp(imagenes: dict[int, dict], productos: list[dict]) -> t
         try:
             ruta.write_bytes(img["data"])
             productos[prod_idx]["imagen_temp_stem"] = nombre_archivo
+            productos[prod_idx]["imagen_temp_path"] = str(ruta)
             guardadas += 1
         except Exception as e:
             errores.append(f"No se pudo guardar imagen de '{nombre}': {e}")
@@ -3170,6 +3171,9 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
             datos.setdefault("atributo_desc", datos.get("atributo_cod", ""))
         datos_vision[i] = datos
 
+    # Liberar bytes de imágenes — ya están en disco y ya se usaron para Vision
+    del imagenes
+
     # ── Paso 2: Nombre base + atributo en batch ───────────────────────────────
     clasificaciones = _extraer_nombre_base_atributo_batch(productos)
 
@@ -3192,8 +3196,6 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         clas    = clasificaciones[i] if i < len(clasificaciones) else {}
         row_num = prod.get("fila_excel_0idx", i + 1)
         img     = imagenes.get(row_num)
-        img_data = img["data"] if img else None
-
         nombre      = prod.get("nombre") or f"Producto {i+1}"
         nombre_base = (clas.get("nombre_base") or nombre).strip()
         att_tipo    = clas.get("atributo_tipo")
@@ -3211,7 +3213,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
             "atributo_cod":    att_cod,
             "subcategoria_cod": sub_cod,
             "datos_vision":    datos,
-            "imagen_data":     img_data,
+            "imagen_temp_path": prod.get("imagen_temp_path"),
             "padre_fuente":    "nuevo",
             "padre_odoo_id":   None,
             "padre_odoo_nombre": "",
@@ -3257,9 +3259,12 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
             # ── Buscar en Odoo ─────────────────────────────────────────────
             candidato = None
             if prods_odoo:
+                _img_path = prod.get("imagen_temp_path")
+                _img_bytes = Path(_img_path).read_bytes() if _img_path and Path(_img_path).exists() else None
                 candidato = _buscar_padre_en_odoo_por_nombre(
-                    nombre_base, prods_odoo, phashes_odoo, img_data
+                    nombre_base, prods_odoo, phashes_odoo, _img_bytes
                 )
+                del _img_bytes
 
             if candidato:
                 prod_odoo  = candidato["prod"]
@@ -3332,6 +3337,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         })
         propuestas.append(prop)
 
+    del datos_vision
     return propuestas
 
 
@@ -5312,10 +5318,10 @@ if st.session_state.get("clasificacion_activa"):
 
             # ── Imagen del producto (del Excel) ───────────────────────────────
             with _c_img:
-                _img_data = _prop.get("imagen_data")
-                if _img_data:
+                _img_path = _prop.get("imagen_temp_path")
+                if _img_path and Path(_img_path).exists():
                     try:
-                        st.image(_img_data, width=80, caption=f"F{_fila}")
+                        st.image(_img_path, width=80, caption=f"F{_fila}")
                     except Exception:
                         st.caption(f"F{_fila}")
                 else:

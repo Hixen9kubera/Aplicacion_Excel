@@ -7,6 +7,7 @@ Responsabilidades:
 - Estrategia dual:
     • Batch API de Anthropic para lotes > BATCH_THRESHOLD (sin rate limit, async)
     • Paralelo con bloques para lotes pequeños (síncrono, más rápido)
+- Caché de resultados Vision por phash de imagen (ahorra costo en reórdenes)
 
 Entrada : productos (list[dict]), imagenes ({row_0idx: {data, ext}})
 Salida  : datos_vision ({idx: {subcategoria_cod, atributo_cod, titulo, ...}})
@@ -17,6 +18,7 @@ import base64
 import concurrent.futures
 import json
 import os
+import pickle
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -25,6 +27,8 @@ import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
+from agents.utils import _phash_imagen
+
 # Usar Batch API cuando hay más de este número de productos con imagen
 BATCH_THRESHOLD = 12
 
@@ -32,6 +36,12 @@ BATCH_THRESHOLD = 12
 _RATE_LIMIT   = 30_000
 _TOKENS_CALL  = 2_000
 _BLOQUE_SIZE  = max(1, int(_RATE_LIMIT / _TOKENS_CALL * 0.8))   # = 12
+
+# Caché de resultados Vision
+_VISION_CACHE_PATH = Path(__file__).parent.parent / "vision_cache.pkl"
+_CAMPOS_CACHE      = ("subcategoria_cod", "atributo_cod", "atributo_desc",
+                      "titulo", "descripcion", "categoria")
+_UMBRAL_CACHE      = 10   # distancia phash máxima para considerar "misma imagen"
 
 
 # ── Prompt y parseo ───────────────────────────────────────────────────────────
@@ -112,6 +122,95 @@ def _parse_vision_response(texto: str, contexto: dict | None = None) -> dict:
             "atributo_cod": "EST", "atributo_desc": "Estándar",
             "_error": str(e),
         }
+
+
+# ── Caché de resultados Vision ────────────────────────────────────────────────
+
+def _cargar_cache_vision() -> dict:
+    """
+    Carga el caché de Vision desde Supabase (persistente) o archivo local.
+    Devuelve {phash_hex: {subcategoria_cod, atributo_cod, ...}}.
+    """
+    # Supabase (preferido — sobrevive reinicios del servidor)
+    try:
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_KEY", "")
+        if url and key:
+            from supabase import create_client
+            sb   = create_client(url, key)
+            resp = sb.table("vision_cache").select(
+                "phash_hex,subcategoria_cod,atributo_cod,atributo_desc,titulo,descripcion,categoria"
+            ).execute()
+            if resp.data:
+                return {r["phash_hex"]: r for r in resp.data}
+    except Exception:
+        pass
+
+    # Fallback local
+    if _VISION_CACHE_PATH.exists():
+        try:
+            with open(_VISION_CACHE_PATH, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+
+    return {}
+
+
+def _guardar_cache_vision(nuevos: list[dict]) -> None:
+    """
+    Persiste nuevos resultados Vision en Supabase y en archivo local.
+    nuevos: [{phash_hex, subcategoria_cod, atributo_cod, atributo_desc, titulo, descripcion, categoria}]
+    """
+    if not nuevos:
+        return
+
+    # Supabase
+    try:
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_KEY", "")
+        if url and key:
+            from supabase import create_client
+            sb = create_client(url, key)
+            for i in range(0, len(nuevos), 100):
+                sb.table("vision_cache").upsert(nuevos[i:i+100]).execute()
+    except Exception:
+        pass
+
+    # Local
+    try:
+        cache: dict = {}
+        if _VISION_CACHE_PATH.exists():
+            with open(_VISION_CACHE_PATH, "rb") as f:
+                cache = pickle.load(f)
+        for item in nuevos:
+            cache[item["phash_hex"]] = item
+        with open(_VISION_CACHE_PATH, "wb") as f:
+            pickle.dump(cache, f)
+    except Exception:
+        pass
+
+
+def _buscar_en_cache(phash_img, cache: dict, umbral: int = _UMBRAL_CACHE) -> dict | None:
+    """
+    Busca en el caché de Vision por similitud de phash.
+    Devuelve el resultado más cercano si dist ≤ umbral, o None.
+    """
+    if phash_img is None or not cache:
+        return None
+    try:
+        import imagehash
+        mejor_dist = umbral + 1
+        mejor      = None
+        for phash_hex, datos in cache.items():
+            ph   = imagehash.hex_to_hash(phash_hex)
+            dist = phash_img - ph
+            if dist <= umbral and dist < mejor_dist:
+                mejor_dist = dist
+                mejor      = datos
+        return mejor
+    except Exception:
+        return None
 
 
 # ── Modo síncrono (individual, con retry) ────────────────────────────────────
@@ -195,6 +294,7 @@ def _agente_vision_batch(
     """
     Procesa imágenes usando la Batch API de Anthropic.
     Sin límite de tokens por minuto — idóneo para 50+ productos.
+    Consulta caché por phash antes de agregar al batch.
 
     on_progress(n_done, n_total) es llamado cada vez que se obtienen resultados parciales.
     Devuelve datos_vision {idx: {...}}.
@@ -204,16 +304,28 @@ def _agente_vision_batch(
         "png": "image/png",  "gif": "image/gif",
         "webp": "image/webp", "bmp": "image/png",
     }
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    client       = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    cache_vision = _cargar_cache_vision()
 
-    # ── Preparar requests para productos CON imagen ───────────────────────────
-    batch_requests = []
-    idx_sin_imagen: list[int] = []
+    # ── Preparar requests — separar hits de caché vs pendientes de Vision ────
+    batch_requests:  list[dict]         = []
+    idx_sin_imagen:  list[int]          = []
+    phashes_batch:   dict[str, object]  = {}   # custom_id → phash_img
+    datos_vision:    dict[int, dict]    = {}
 
     for i, prod in enumerate(productos):
         row_num = prod.get("fila_excel_0idx", i + 1)
         img     = imagenes.get(row_num)
         if img:
+            img_phash = _phash_imagen(img["data"])
+            cached    = _buscar_en_cache(img_phash, cache_vision)
+            if cached:
+                # Hit de caché → resultado gratis
+                datos_vision[i] = {k: cached.get(k, "") for k in _CAMPOS_CACHE}
+                datos_vision[i]["_error"] = None
+                continue
+
+            # Miss de caché → agregar al batch
             media_type = media_map.get(img["ext"], "image/jpeg")
             img_b64    = base64.b64encode(img["data"]).decode("utf-8")
             ctx        = {
@@ -235,10 +347,10 @@ def _agente_vision_batch(
                     ]}],
                 },
             })
+            if img_phash is not None:
+                phashes_batch[str(i)] = img_phash
         else:
             idx_sin_imagen.append(i)
-
-    datos_vision: dict[int, dict] = {}
 
     # ── Procesar productos SIN imagen con Claude Haiku (texto) ───────────────
     for i in idx_sin_imagen:
@@ -253,29 +365,39 @@ def _agente_vision_batch(
         return datos_vision
 
     # ── Enviar batch ──────────────────────────────────────────────────────────
-    batch = client.messages.batches.create(requests=batch_requests)
+    batch   = client.messages.batches.create(requests=batch_requests)
     n_total = len(batch_requests)
 
     # ── Polling hasta completar ───────────────────────────────────────────────
-    poll_interval = 30   # segundos entre checks
+    poll_interval = 30
     while batch.processing_status == "in_progress":
         time.sleep(poll_interval)
-        batch = client.messages.batches.retrieve(batch.id)
+        batch  = client.messages.batches.retrieve(batch.id)
         n_done = batch.request_counts.succeeded + batch.request_counts.errored
         if on_progress:
             on_progress(n_done, n_total)
 
-    # ── Recoger resultados ────────────────────────────────────────────────────
+    # ── Recoger resultados y actualizar caché ─────────────────────────────────
+    nuevos_cache: list[dict] = []
     for result in client.messages.batches.results(batch.id):
-        idx = int(result.custom_id)
+        idx  = int(result.custom_id)
         prod = productos[idx]
         ctx  = {"nombre": prod.get("nombre")}
         if result.result.type == "succeeded":
             texto = result.result.message.content[0].text.strip()
-            datos_vision[idx] = _parse_vision_response(texto, ctx)
+            datos = _parse_vision_response(texto, ctx)
         else:
-            datos_vision[idx] = _parse_vision_response("", ctx)
+            datos = _parse_vision_response("", ctx)
+        datos_vision[idx] = datos
 
+        # Guardar en caché si la respuesta fue exitosa
+        if not datos.get("_error") and (ph := phashes_batch.get(result.custom_id)):
+            nuevos_cache.append({
+                "phash_hex": str(ph),
+                **{k: datos.get(k, "") for k in _CAMPOS_CACHE},
+            })
+
+    _guardar_cache_vision(nuevos_cache)
     return datos_vision
 
 
@@ -288,33 +410,50 @@ def _agente_vision_paralelo(
     """
     Procesa imágenes en bloques paralelos con pausa entre bloques para respetar
     el rate limit de 30,000 tokens/minuto de Anthropic.
+    Consulta caché por phash antes de llamar a Vision.
     """
+    cache_vision = _cargar_cache_vision()
+
     def _procesar(args):
         i, prod = args
         row_num = prod.get("fila_excel_0idx", i + 1)
         img     = imagenes.get(row_num)
         if img:
+            img_phash = _phash_imagen(img["data"])
+            cached    = _buscar_en_cache(img_phash, cache_vision)
+            if cached:
+                datos = {k: cached.get(k, "") for k in _CAMPOS_CACHE}
+                datos["_error"] = None
+                return i, datos, None   # hit → sin phash que guardar
             ctx   = {"nombre": prod.get("nombre"), "material": prod.get("material"),
                      "uso": prod.get("uso")}
             datos = analizar_imagen_claude(img["data"], img["ext"], ctx)
+            return i, datos, img_phash  # miss → pasar phash para guardarlo
         else:
             datos = _inferir_categoria_manual(
                 prod.get("nombre", ""), prod.get("material", ""), prod.get("uso", "")
             )
             datos.setdefault("atributo_desc", datos.get("atributo_cod", ""))
-        return i, datos
+            return i, datos, None
 
-    datos_vision: dict[int, dict] = {}
+    datos_vision:  dict[int, dict] = {}
+    nuevos_cache:  list[dict]      = []
     bloques = [list(enumerate(productos))[j: j + _BLOQUE_SIZE]
                for j in range(0, len(productos), _BLOQUE_SIZE)]
 
     for b_idx, bloque in enumerate(bloques):
         with concurrent.futures.ThreadPoolExecutor(max_workers=_BLOQUE_SIZE) as ex:
-            for i, datos in ex.map(_procesar, bloque):
+            for i, datos, img_phash in ex.map(_procesar, bloque):
                 datos_vision[i] = datos
+                if img_phash and not datos.get("_error"):
+                    nuevos_cache.append({
+                        "phash_hex": str(img_phash),
+                        **{k: datos.get(k, "") for k in _CAMPOS_CACHE},
+                    })
         if b_idx < len(bloques) - 1:
             time.sleep(62)
 
+    _guardar_cache_vision(nuevos_cache)
     return datos_vision
 
 
@@ -332,6 +471,7 @@ def agente_vision(
     • lote > BATCH_THRESHOLD o forzar_batch=True → Batch API (sin rate limit)
     • lote <= BATCH_THRESHOLD                    → paralelo en bloques (síncrono)
 
+    En ambos modos consulta el caché Vision (phash) antes de llamar a la API.
     Devuelve datos_vision {idx: {subcategoria_cod, atributo_cod, titulo, descripcion, ...}}.
     """
     n_con_imagen = sum(

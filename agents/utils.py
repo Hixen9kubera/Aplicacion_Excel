@@ -28,3 +28,20 @@ def _sanitizar_nombre_archivo(nombre: str) -> str:
     nombre = re.sub(r"[^\w\s-]", "", nombre, flags=re.UNICODE)
     nombre = re.sub(r"[\s]+", "_", nombre)
     return nombre[:100] or "producto"
+
+
+def _phash_imagen(image_data: bytes):
+    """Genera perceptual hash de una imagen. Devuelve objeto imagehash o None."""
+    try:
+        import imagehash
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_data)).convert("RGB")
+        return imagehash.phash(img)
+    except Exception:
+        return None
+
+
+def _similitud_nombres(a: str, b: str) -> float:
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()

@@ -53,7 +53,6 @@ from agents.parser_agent import (
 )
 from agents.vision_agent import (
     analizar_imagen_claude, _inferir_categoria_manual,
-    agente_vision, BATCH_THRESHOLD,
 )
 from agents.nombres_agent import (
     _tiene_chino, normalizar_nombres_productos,
@@ -63,10 +62,10 @@ from agents.nombres_agent import (
     _tiene_diferencia_roja, _nombres_son_similares,
     _diffs_display, _CAMPOS_DETERMINANTES, _CAMPOS_DIFF_DISPLAY, _LABELS_DIFF,
     detectar_productos_duplicados, aplicar_resolucion_duplicados,
-    _extraer_nombre_base_atributo_batch,
     agente_nombres,
 )
 from agents.utils import _phash_imagen, _similitud_nombres
+from agents.graph import ejecutar_vision_y_nombres
 from agents.excel_agent import (
     generar_excel, generar_excel_master, generar_excel_purchase,
     generar_reporte_clasificacion,
@@ -517,17 +516,13 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
     if imagenes:
         guardar_imagenes_temp(imagenes, productos)
 
-    # ── Paso 1: Claude Vision por producto ────────────────────────────────────
-    # agente_vision selecciona automáticamente la estrategia:
-    #   • > BATCH_THRESHOLD productos con imagen → Batch API (sin rate limit)
-    #   • <= BATCH_THRESHOLD                     → paralelo en bloques (síncrono)
-    datos_vision: dict[int, dict] = agente_vision(productos, imagenes)
+    # ── Pasos 1+2: Vision y Nombres en PARALELO (LangGraph fan-out) ─────────
+    # ejecutar_vision_y_nombres corre agente_vision y _extraer_nombre_base_atributo_batch
+    # concurrentemente en un thread pool gestionado por LangGraph.
+    datos_vision, clasificaciones = ejecutar_vision_y_nombres(productos, imagenes)
 
     # Liberar bytes de imágenes — ya están en disco y ya se usaron para Vision
     del imagenes
-
-    # ── Paso 2: Nombre base + atributo en batch ───────────────────────────────
-    clasificaciones = _extraer_nombre_base_atributo_batch(productos)
 
     # ── Paso 3: Construir propuestas ──────────────────────────────────────────
     # Registro local: nombre_base → {sku_padre, subcod, numero, odoo_id, odoo_nombre,

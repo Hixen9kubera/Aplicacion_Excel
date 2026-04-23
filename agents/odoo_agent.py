@@ -633,10 +633,20 @@ def _subir_productos_a_odoo(
             errores.append(f"No se pudo leer imagen '{archivo.name}': {e}")
             continue
         try:
+            # Buscar primero en product.template (SKU padre)
             tmpl_ids = models_proxy.execute_kw(
                 odoo_db, uid, odoo_pass, "product.template", "search",
                 [[["default_code", "=", sku]]],
             )
+            # Si no está en template, buscar en product.product (SKU variante)
+            if not tmpl_ids:
+                var_ids = models_proxy.execute_kw(
+                    odoo_db, uid, odoo_pass, "product.product", "search_read",
+                    [[["default_code", "=", sku]]],
+                    {"fields": ["product_tmpl_id"], "limit": 1},
+                )
+                if var_ids:
+                    tmpl_ids = [var_ids[0]["product_tmpl_id"][0]]
             if not tmpl_ids:
                 errores.append(f"Producto `{sku}` no encontrado en Odoo")
                 continue

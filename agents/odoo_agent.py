@@ -541,8 +541,7 @@ def _crear_producto_en_odoo(
             "description_sale": "\n".join(desc_partes),
             "description":      "\n".join(notas) if notas else False,
             "categ_id":         cat_id,
-            "list_price":       precio_mxn,
-            "standard_price":   costo_unitario,
+            "list_price":       costo_unitario,
             "type":             "product",
             "sale_ok":          True,
             "purchase_ok":      True,
@@ -551,16 +550,6 @@ def _crear_producto_en_odoo(
         if volumen_pz is not None:
             vals["volume"] = volumen_pz
         prod_id = models.execute_kw(db, uid, pw, "product.template", "create", [vals])
-
-        if prod_id and costo_unitario > 0:
-            try:
-                pp_ids = models.execute_kw(db, uid, pw, "product.product", "search",
-                                           [[["product_tmpl_id", "=", prod_id]]])
-                if pp_ids:
-                    models.execute_kw(db, uid, pw, "product.product", "write",
-                                      [pp_ids, {"standard_price": costo_unitario}])
-            except Exception:
-                pass
 
         atrib_cod = (prod.get("atributo_cod") or "EST").strip().upper()
         atrib_val = atributos_map.get(atrib_cod)

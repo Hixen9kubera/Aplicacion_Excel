@@ -670,6 +670,13 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
 
         prop["accion_display"] = ACCION_LABELS.get(prop["accion"], prop["accion"])
 
+        # Auto-marcar revisión: duplicados y variantes/reutilizaciones de padre en Odoo
+        accion_ = prop["accion"]
+        if accion_ in ("duplicado", "reutilizar") or (
+            accion_ == "crear_variante" and prop.get("padre_fuente") == "odoo"
+        ):
+            prop["requiere_revision"] = True
+
         # Enriquecer el producto con datos de visión para el Excel
         prod.update({
             "sku":             prop["sku"],
@@ -771,7 +778,7 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
         return vid
 
     def _build_vals(prod: dict, nombre_tmpl: str, precio_usd: float,
-                    precio_mxn: float, costo_unitario: float,
+                    costo_unitario: float,
                     sku_direct: str | None = None) -> dict:
         """Construye el dict de valores para product.template con todos los campos."""
         cbm_pz       = _cbm_por_pieza(prod)
@@ -835,8 +842,7 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
             "type":             "product",
             "sale_ok":          True,
             "purchase_ok":      True,
-            "list_price":       precio_mxn,
-            "standard_price":   costo_unitario,
+            "list_price":       costo_unitario,
         }
         if desc_partes:
             vals["description_sale"] = "\n".join(desc_partes)
@@ -936,7 +942,7 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                 # Para padre+variante: poner sku_padre en default_code del template
                 # Para padre solo: poner el sku directamente
                 sku_direct = sku_padre if accion == "crear_padre_y_variante" else sku
-                vals = _build_vals(prod, nombre_tmpl, precio_usd, precio_mxn,
+                vals = _build_vals(prod, nombre_tmpl, precio_usd,
                                    costo_unitario, sku_direct=sku_direct)
                 tmpl_id = models.execute_kw(
                     odoo_db, uid, odoo_pass, "product.template", "create", [vals])

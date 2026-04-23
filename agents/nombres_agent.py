@@ -648,17 +648,11 @@ def aplicar_resolucion_duplicados(
 
 # ── Extracción de nombre_base y atributo en batch ────────────────────────────
 
-def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
-    """
-    Una sola llamada a Claude Haiku para extraer nombre_base, atributo_tipo y
-    atributo_valor de todos los productos. Devuelve lista en el mismo orden.
-    """
-    if not productos:
-        return []
-    lineas = []
-    for i, p in enumerate(productos):
-        nombre = p.get("nombre") or p.get("titulo") or f"Producto {i+1}"
-        lineas.append(f"{i}: {nombre}")
+_CHUNK_NOMBRES = 80  # max productos por llamada (~6 400 tokens de salida, dentro del límite de Haiku)
+
+
+def _extraer_chunk(lineas: list[str]) -> list[dict]:
+    """Llama a Haiku con un subconjunto de líneas y devuelve la lista de clasificaciones."""
     prompt = (
         "Analiza estos nombres de productos de una importación de contenedor.\n"
         "Para cada uno extrae:\n"
@@ -671,24 +665,46 @@ def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
         "[{\"nombre_base\":\"...\",\"atributo_tipo\":\"...\",\"atributo_valor\":\"...\"}, ...]\n\n"
         "Productos:\n" + "\n".join(lineas)
     )
-    try:
-        llm  = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=2000)
-        resp = llm.invoke([HumanMessage(content=prompt)])
-        content = resp.content
-        if isinstance(content, list):
-            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-        content = content.strip()
-        start = content.find("[")
-        end   = content.rfind("]") + 1
-        if start >= 0 and end > start:
-            content = content[start:end]
-        resultados = json.loads(content)
-        while len(resultados) < len(productos):
-            resultados.append({"nombre_base": None, "atributo_tipo": None, "atributo_valor": None})
-        return resultados[:len(productos)]
-    except Exception:
-        return [{"nombre_base": None, "atributo_tipo": None, "atributo_valor": None}
-                for _ in productos]
+    llm  = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=8000)
+    resp = llm.invoke([HumanMessage(content=prompt)])
+    content = resp.content
+    if isinstance(content, list):
+        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    content = content.strip()
+    start = content.find("[")
+    end   = content.rfind("]") + 1
+    if start >= 0 and end > start:
+        content = content[start:end]
+    return json.loads(content)
+
+
+def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
+    """
+    Extrae nombre_base, atributo_tipo y atributo_valor de todos los productos.
+    Divide en chunks de _CHUNK_NOMBRES para no superar el límite de salida de Haiku.
+    Devuelve lista en el mismo orden que productos.
+    """
+    if not productos:
+        return []
+
+    _vacio = {"nombre_base": None, "atributo_tipo": None, "atributo_valor": None}
+    lineas = [
+        f"{i}: {p.get('nombre') or p.get('titulo') or f'Producto {i+1}'}"
+        for i, p in enumerate(productos)
+    ]
+
+    resultados: list[dict] = []
+    for inicio in range(0, len(lineas), _CHUNK_NOMBRES):
+        chunk = lineas[inicio: inicio + _CHUNK_NOMBRES]
+        try:
+            parcial = _extraer_chunk(chunk)
+        except Exception:
+            parcial = []
+        while len(parcial) < len(chunk):
+            parcial.append(_vacio)
+        resultados.extend(parcial[:len(chunk)])
+
+    return resultados
 
 
 # ── Nodo LangGraph ─────────────────────────────────────────────────────────────

@@ -100,7 +100,7 @@ SUBCATEGORIAS = {
     # MUEBLES - HOGAR
     "MUE": "Muebles Hogar",   "MES": "Mesa",          "SIL": "Silla",
     "CAM": "Cama",            "EST": "Estantería",     "ORG": "Organizador",
-    "COM": "Comedor",         "ESCR": "Escritorio",    "BAÑ": "Mueble Baño",
+    "COM": "Comedor",         "ESCR": "Escritorio",    "BAN": "Mueble Baño",
     "JAR": "Mueble Jardín",   "TV": "Mueble TV",       "COC": "Mueble Cocina",
     "DEC": "Decoración Hogar","ILUM": "Iluminación",   "TEX": "Textiles Hogar",
     # BEBÉS - INFANTIL
@@ -711,9 +711,9 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
     if not all([odoo_url, odoo_db, odoo_user, odoo_pass]):
         return [], ["Faltan credenciales ODOO en .env"]
     try:
-        common = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True)
+        common = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
         uid    = common.authenticate(odoo_db, odoo_user, odoo_pass, {})
-        models = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True)
+        models = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
     except Exception as e:
         return [], [f"No se pudo conectar a ODOO: {e}"]
 
@@ -1308,9 +1308,9 @@ with st.sidebar:
             st.warning("Faltan credenciales ODOO en el .env")
         else:
             try:
-                common = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True)
+                common = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
                 uid    = common.authenticate(odoo_db, odoo_user, odoo_pass, {})
-                models = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True)
+                models = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
 
                 # Buscar la categoría PRUEBAS_AGENTE
                 cat_ids = models.execute_kw(odoo_db, uid, odoo_pass,

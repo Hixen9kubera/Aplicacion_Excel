@@ -289,11 +289,11 @@ def _buscar_padre_en_odoo_por_nombre(
 def cargar_skus_odoo(url: str, db: str, username: str, password: str) -> tuple[list[str], str | None]:
     """Obtiene todos los SKUs (default_code) de Odoo via XML-RPC."""
     try:
-        common    = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
+        common    = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
         uid       = common.authenticate(db, username, password, {})
         if not uid:
             return [], "Credenciales inválidas o usuario sin acceso."
-        models    = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
+        models    = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
         productos = models.execute_kw(
             db, uid, password,
             "product.template", "search_read",
@@ -308,11 +308,11 @@ def cargar_skus_odoo(url: str, db: str, username: str, password: str) -> tuple[l
 def cargar_todos_productos_odoo(url: str, db: str, username: str, password: str) -> list[dict]:
     """Carga nombre, SKU e imagen de todos los productos con SKU en Odoo."""
     try:
-        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
+        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
         uid    = common.authenticate(db, username, password, {})
         if not uid:
             return []
-        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
+        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
         return models.execute_kw(
             db, uid, password,
             "product.template", "search_read",
@@ -332,11 +332,11 @@ def cargar_detalle_productos_odoo(skus: list[str]) -> list[dict]:
     if not all([url, db, username, password]) or not skus:
         return []
     try:
-        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
+        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
         uid    = common.authenticate(db, username, password, {})
         if not uid:
             return []
-        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
+        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
         return models.execute_kw(
             db, uid, password,
             "product.template", "search_read",
@@ -611,11 +611,11 @@ def _subir_productos_a_odoo(
         return subidas, ["Faltan credenciales ODOO en .env — imágenes no subidas"]
 
     try:
-        common       = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True)
+        common       = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
         uid          = common.authenticate(odoo_db, odoo_user, odoo_pass, {})
         if not uid:
             return subidas, ["Credenciales ODOO inválidas"]
-        models_proxy = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True)
+        models_proxy = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
     except Exception as e:
         return subidas, [f"No se pudo conectar a ODOO: {e}"]
 

@@ -32,6 +32,22 @@ from agents.utils import _phash_imagen
 # Usar Batch API cuando hay más de este número de productos con imagen
 BATCH_THRESHOLD = 12
 
+
+def _comprimir_imagen(data: bytes, max_px: int = 1024, quality: int = 85) -> tuple[bytes, str]:
+    """Redimensiona y comprime una imagen a JPEG. Devuelve (bytes, 'image/jpeg')."""
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(data))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        img.thumbnail((max_px, max_px), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return data, "image/jpeg"
+
 # Rate limit síncrono (tokens/min ÷ tokens/llamada × 0.8)
 _RATE_LIMIT   = 30_000
 _TOKENS_CALL  = 2_000
@@ -230,6 +246,7 @@ def analizar_imagen_claude(image_data: bytes, ext: str, contexto: dict | None = 
 
     try:
         client  = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        image_data, media_type = _comprimir_imagen(image_data)
         img_b64 = base64.b64encode(image_data).decode("utf-8")
         resp    = None
         for _intento in range(4):
@@ -325,9 +342,9 @@ def _agente_vision_batch(
                 datos_vision[i]["_error"] = None
                 continue
 
-            # Miss de caché → agregar al batch
-            media_type = media_map.get(img["ext"], "image/jpeg")
-            img_b64    = base64.b64encode(img["data"]).decode("utf-8")
+            # Miss de caché → comprimir y agregar al batch
+            img_data, media_type = _comprimir_imagen(img["data"])
+            img_b64 = base64.b64encode(img_data).decode("utf-8")
             ctx        = {
                 "nombre":   prod.get("nombre"),
                 "material": prod.get("material"),

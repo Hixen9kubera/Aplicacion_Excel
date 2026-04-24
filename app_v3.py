@@ -849,45 +849,13 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
         if notas:
             vals["description"] = "\n".join(notas)
 
-        # ── Pestaña Inventario / Empaque ──────────────────────────────────────
-        # volume: preferir volumen_por_pieza si viene explícito, si no usar cbm_pz
+        # ── Campos core (siempre disponibles) ────────────────────────────────
         vol_pz = _safe_float(prod.get("volumen_por_pieza")) or cbm_pz
         if vol_pz > 0:
-            vals["volume"]          = vol_pz
-            vals["cbm_per_product"] = vol_pz
+            vals["volume"] = vol_pz
         peso = _safe_float(prod.get("peso_kg"))
         if peso > 0:
             vals["weight"] = peso
-        if precio_usd > 0:
-            vals["costo_usd"] = precio_usd
-        cbm_mc = _safe_float(prod.get("cbm_master_carton"))
-        if cbm_mc > 0:
-            vals["cbm_master_box"] = cbm_mc        # CBM por caja master
-        pzs_caja = prod.get("piezas_x_caja")
-        if pzs_caja:
-            try:
-                vals["units_per_master_box"] = int(float(pzs_caja))
-            except (ValueError, TypeError):
-                pass
-        if largo:
-            try:
-                vals["length"] = float(largo)
-            except (ValueError, TypeError):
-                pass
-        if ancho:
-            try:
-                vals["width"] = float(ancho)
-            except (ValueError, TypeError):
-                pass
-        if alto:
-            try:
-                vals["height"] = float(alto)
-            except (ValueError, TypeError):
-                pass
-        # Número de contenedor (campo texto)
-        _contenedor_num = st.session_state.get("contenedor_val", "")
-        if _contenedor_num:
-            vals["container_numbers"] = _contenedor_num
 
         if sku_direct:
             vals["default_code"] = sku_direct
@@ -896,6 +864,40 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
         if cid:
             vals["categ_id"] = cid
         return vals
+
+    def _write_campos_custom(tmpl_id: int, prod: dict, precio_usd: float, cbm_pz: float) -> None:
+        """Escribe campos de módulos adicionales — si no existen en este Odoo, los ignora."""
+        custom: dict = {}
+        vol_pz = _safe_float(prod.get("volumen_por_pieza")) or cbm_pz
+        if vol_pz > 0:
+            custom["cbm_per_product"] = vol_pz
+        if precio_usd > 0:
+            custom["costo_usd"] = precio_usd
+        cbm_mc = _safe_float(prod.get("cbm_master_carton"))
+        if cbm_mc > 0:
+            custom["cbm_master_box"] = cbm_mc
+        pzs_caja = prod.get("piezas_x_caja")
+        if pzs_caja:
+            try:
+                custom["units_per_master_box"] = int(float(pzs_caja))
+            except (ValueError, TypeError):
+                pass
+        largo, ancho, alto = prod.get("largo_cm"), prod.get("ancho_cm"), prod.get("alto_cm")
+        for campo, val in [("length", largo), ("width", ancho), ("height", alto)]:
+            if val:
+                try:
+                    custom[campo] = float(val)
+                except (ValueError, TypeError):
+                    pass
+        _contenedor_num = st.session_state.get("contenedor_val", "")
+        if _contenedor_num:
+            custom["container_numbers"] = _contenedor_num
+        if custom:
+            try:
+                models.execute_kw(odoo_db, uid, odoo_pass,
+                                  "product.template", "write", [[tmpl_id], custom])
+            except Exception:
+                pass  # Campos custom no instalados en este Odoo
 
     def _apply_rev_tag_and_note(tmpl_id: int, nota: str) -> None:
         existing = models.execute_kw(
@@ -942,16 +944,11 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                     odoo_db, uid, odoo_pass, "product.template", "create", [vals])
                 templates_creados[sku_padre] = tmpl_id
 
+                _write_campos_custom(tmpl_id, prod, precio_usd, cbm_pz)
                 if requiere_rev:
                     _apply_rev_tag_and_note(tmpl_id, nota_rev)
 
                 if accion == "crear_padre_solo":
-                    # Forzar standard_price en product.product
-                    pp_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.product",
-                                               "search", [[["product_tmpl_id", "=", tmpl_id]]])
-                    if pp_ids:
-                        models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
-                                          [pp_ids, {"standard_price": costo_unitario}])
                     _rev_sfx = " ⚠️ rev" if requiere_rev else ""
                     resultados.append(f"✅ Padre creado: `{sku}` — {nombre_tmpl}{_rev_sfx}")
                 else:
@@ -961,7 +958,7 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                                       "product.template.attribute.line", "create",
                                       [{"product_tmpl_id": tmpl_id, "attribute_id": attr_id,
                                         "value_ids": [(4, val_id)]}])
-                    # Re-write volume/weight/costo_usd: Odoo puede resetearlos al crear variantes
+                    # Re-write volume/weight tras crear variante (Odoo puede resetearlos)
                     _rewrite: dict = {}
                     _vol_pz = _safe_float(prod.get("volumen_por_pieza")) or cbm_pz
                     if _vol_pz > 0:
@@ -969,8 +966,6 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                     _peso = _safe_float(prod.get("peso_kg"))
                     if _peso > 0:
                         _rewrite["weight"] = _peso
-                    if precio_usd > 0:
-                        _rewrite["costo_usd"] = precio_usd
                     if _rewrite:
                         models.execute_kw(odoo_db, uid, odoo_pass,
                                           "product.template", "write", [[tmpl_id], _rewrite])
@@ -979,8 +974,7 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                                                 [[["product_tmpl_id", "=", tmpl_id]]])
                     if var_ids:
                         models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
-                                          [var_ids, {"default_code": sku,
-                                                     "standard_price": costo_unitario}])
+                                          [var_ids, {"default_code": sku}])
                     _rev_sfx = " ⚠️ rev" if requiere_rev else ""
                     resultados.append(f"✅ Padre + variante: `{sku_padre}` / `{sku}` — {nombre_tmpl}{_rev_sfx}")
 
@@ -1012,8 +1006,8 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                        ".product_attribute_value_id", "=", val_id]]])
                 if var_ids:
                     models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
-                                      [var_ids, {"default_code": sku,
-                                                 "standard_price": costo_unitario}])
+                                      [var_ids, {"default_code": sku}])
+                _write_campos_custom(tmpl_id, prod, precio_usd, cbm_pz)
                 if requiere_rev:
                     _apply_rev_tag_and_note(tmpl_id, nota_rev)
                 _rev_sfx = " ⚠️ rev" if requiere_rev else ""
@@ -1208,13 +1202,8 @@ with st.sidebar:
     if info_cache:
         st.caption(f"💾 Cache: {info_cache}")
 
-    col_odoo1, col_odoo2 = st.columns(2)
-    with col_odoo1:
-        cargar_btn = st.button("🔄 Cargar SKUs", width="stretch",
-                               help="Usa Supabase si tiene datos; si no, carga desde ODOO")
-    with col_odoo2:
-        forzar_btn = st.button("🔃 Actualizar", width="stretch",
-                               help="Fuerza recarga desde ODOO y sincroniza a Supabase")
+    cargar_btn = st.button("🔄 Cargar / Actualizar SKUs", width="stretch",
+                           help="Carga desde caché si está disponible; si no, descarga desde ODOO y sincroniza")
 
     def _aplicar_datos_odoo(skus, productos, phashes, imagen_urls=None, desde_cache=False):
         st.session_state.odoo_skus       = skus
@@ -1289,8 +1278,6 @@ with st.sidebar:
 
     if cargar_btn:
         _cargar_desde_odoo(forzar=False)
-    if forzar_btn:
-        _cargar_desde_odoo(forzar=True)
 
     if st.session_state.odoo_conectado:
         st.success(f"✅ ODOO activo — {len(st.session_state.odoo_skus)} SKUs en sesión")

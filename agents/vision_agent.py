@@ -364,38 +364,43 @@ def _agente_vision_batch(
     if not batch_requests:
         return datos_vision
 
-    # ── Enviar batch ──────────────────────────────────────────────────────────
-    batch   = client.messages.batches.create(requests=batch_requests)
+    # ── Enviar en chunks de 50 para no superar el límite de 256 MB ───────────
+    _CHUNK = 50
+    chunks  = [batch_requests[i:i+_CHUNK] for i in range(0, len(batch_requests), _CHUNK)]
     n_total = len(batch_requests)
+    n_done  = 0
 
-    # ── Polling hasta completar ───────────────────────────────────────────────
-    poll_interval = 30
-    while batch.processing_status == "in_progress":
-        time.sleep(poll_interval)
-        batch  = client.messages.batches.retrieve(batch.id)
-        n_done = batch.request_counts.succeeded + batch.request_counts.errored
-        if on_progress:
-            on_progress(n_done, n_total)
-
-    # ── Recoger resultados y actualizar caché ─────────────────────────────────
     nuevos_cache: list[dict] = []
-    for result in client.messages.batches.results(batch.id):
-        idx  = int(result.custom_id)
-        prod = productos[idx]
-        ctx  = {"nombre": prod.get("nombre")}
-        if result.result.type == "succeeded":
-            texto = result.result.message.content[0].text.strip()
-            datos = _parse_vision_response(texto, ctx)
-        else:
-            datos = _parse_vision_response("", ctx)
-        datos_vision[idx] = datos
 
-        # Guardar en caché si la respuesta fue exitosa
-        if not datos.get("_error") and (ph := phashes_batch.get(result.custom_id)):
-            nuevos_cache.append({
-                "phash_hex": str(ph),
-                **{k: datos.get(k, "") for k in _CAMPOS_CACHE},
-            })
+    for chunk in chunks:
+        batch = client.messages.batches.create(requests=chunk)
+
+        poll_interval = 30
+        while batch.processing_status == "in_progress":
+            time.sleep(poll_interval)
+            batch   = client.messages.batches.retrieve(batch.id)
+            n_done_ = batch.request_counts.succeeded + batch.request_counts.errored
+            if on_progress:
+                on_progress(n_done + n_done_, n_total)
+
+        for result in client.messages.batches.results(batch.id):
+            idx  = int(result.custom_id)
+            prod = productos[idx]
+            ctx  = {"nombre": prod.get("nombre")}
+            if result.result.type == "succeeded":
+                texto = result.result.message.content[0].text.strip()
+                datos = _parse_vision_response(texto, ctx)
+            else:
+                datos = _parse_vision_response("", ctx)
+            datos_vision[idx] = datos
+
+            if not datos.get("_error") and (ph := phashes_batch.get(result.custom_id)):
+                nuevos_cache.append({
+                    "phash_hex": str(ph),
+                    **{k: datos.get(k, "") for k in _CAMPOS_CACHE},
+                })
+
+        n_done += len(chunk)
 
     _guardar_cache_vision(nuevos_cache)
     return datos_vision

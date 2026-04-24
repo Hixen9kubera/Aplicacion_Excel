@@ -898,19 +898,14 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
         return vals
 
     def _apply_rev_tag_and_note(tmpl_id: int, nota: str) -> None:
-        tag_id = _get_or_create_tag("Requiere Revisión")
-        update: dict = {}
-        if tag_id:
-            update["tag_ids"] = [(4, tag_id)]
-        if nota:
-            existing = models.execute_kw(
-                odoo_db, uid, odoo_pass, "product.template", "read",
-                [[tmpl_id]], {"fields": ["description"]})
-            prev = (existing[0].get("description") or "") if existing else ""
-            update["description"] = f"⚠️ REQUIERE REVISIÓN: {nota}\n{prev}".strip()
-        if update:
-            models.execute_kw(odoo_db, uid, odoo_pass,
-                              "product.template", "write", [[tmpl_id], update])
+        existing = models.execute_kw(
+            odoo_db, uid, odoo_pass, "product.template", "read",
+            [[tmpl_id]], {"fields": ["description"]})
+        prev = (existing[0].get("description") or "") if existing else ""
+        prefijo = f"⚠️ REQUIERE REVISIÓN: {nota}" if nota else "⚠️ REQUIERE REVISIÓN"
+        nueva_desc = f"{prefijo}\n{prev}".strip()
+        models.execute_kw(odoo_db, uid, odoo_pass,
+                          "product.template", "write", [[tmpl_id], {"description": nueva_desc}])
 
     resultados: list[str] = []
     errores:    list[str] = []

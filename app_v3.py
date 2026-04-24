@@ -891,10 +891,10 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
 
         if sku_direct:
             vals["default_code"] = sku_direct
-        if modo_prueba:
-            cid = _get_cat("PRUEBAS_AGENTE")
-            if cid:
-                vals["categ_id"] = cid
+        cat_nombre = "PRUEBAS_AGENTE" if modo_prueba else "Productos Agente"
+        cid = _get_cat(cat_nombre)
+        if cid:
+            vals["categ_id"] = cid
         return vals
 
     def _apply_rev_tag_and_note(tmpl_id: int, nota: str) -> None:

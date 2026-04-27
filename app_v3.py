@@ -77,7 +77,7 @@ from agents.odoo_agent import (
     buscar_similares_odoo, _buscar_padre_en_odoo_por_nombre,
     cargar_skus_odoo, cargar_todos_productos_odoo, cargar_detalle_productos_odoo,
     aplicar_resoluciones_conflictos, validar_sku_vs_odoo,
-    _subir_productos_a_odoo,
+    _subir_productos_a_odoo, _reintentar_skus_fallidos,
 )
 
 # ── Cargar .env ────────────────────────────────────────────────────────────────
@@ -1051,8 +1051,13 @@ def generar_excel_tool(productos: List[dict] | None = None) -> str:
         master_bytes       = fut_master.result()
         subidas, errs_odoo = fut_odoo.result()
 
-    # Limpiar imágenes temporales restantes (fallidas o sin ODOO)
-    # Drive ya las tiene; la carpeta temp ya no es necesaria
+    # Reintentar SKUs que fallaron antes de borrar imágenes
+    if errs_odoo:
+        _sub2, _err2 = _reintentar_skus_fallidos(errs_odoo, prods, tipo_cambio, costo_por_m3)
+        subidas  = subidas + _sub2
+        errs_odoo = [e for e in errs_odoo if not any(s in e for s in _sub2)] + _err2
+
+    # Limpiar imágenes temporales
     if IMAGENES_TEMP_PATH.exists():
         for _f in IMAGENES_TEMP_PATH.iterdir():
             try:

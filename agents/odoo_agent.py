@@ -659,3 +659,108 @@ def _subir_productos_a_odoo(
             errores.append(f"Error al subir imagen para `{sku}`: {e}")
 
     return subidas, errores
+
+
+def _reintentar_skus_fallidos(
+    errores_subida: list[str],
+    productos: list[dict],
+    tipo_cambio: float,
+    costo_por_m3: float,
+) -> tuple[list[str], list[str]]:
+    """
+    Para cada SKU que falló en _subir_productos_a_odoo, intenta:
+      1. Buscarlo en Odoo por nombre
+      2. Si lo encuentra → actualiza el default_code y sube la imagen
+      3. Si no lo encuentra → crea el producto y sube la imagen
+    Debe llamarse ANTES de borrar IMAGENES_TEMP_PATH.
+    """
+    import re as _re
+
+    subidas: list[str] = []
+    errores: list[str] = []
+
+    skus_fallidos = []
+    for msg in errores_subida:
+        m = _re.search(r"`([^`]+)`\s+no encontrado", msg)
+        if m:
+            skus_fallidos.append(m.group(1))
+    if not skus_fallidos:
+        return subidas, errores
+
+    odoo_url  = os.environ.get("ODOO_URL", "")
+    odoo_db   = os.environ.get("ODOO_DB", "")
+    odoo_user = os.environ.get("ODOO_USER", "")
+    odoo_pass = os.environ.get("ODOO_PASSWORD", "")
+    if not all([odoo_url, odoo_db, odoo_user, odoo_pass]):
+        return subidas, errores
+
+    try:
+        common = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
+        uid    = common.authenticate(odoo_db, odoo_user, odoo_pass, {})
+        models = xmlrpc.client.ServerProxy(f"{odoo_url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
+    except Exception as e:
+        return subidas, [f"No se pudo conectar a ODOO para reintento: {e}"]
+
+    prod_por_sku = {p.get("sku"): p for p in productos if p.get("sku")}
+
+    for sku in skus_fallidos:
+        prod = prod_por_sku.get(sku)
+        if not prod:
+            errores.append(f"Reintento: datos no encontrados para `{sku}`")
+            continue
+
+        imagen_path = None
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            candidate = IMAGENES_TEMP_PATH / f"{sku}.{ext}"
+            if candidate.exists():
+                imagen_path = candidate
+                break
+        if not imagen_path:
+            errores.append(f"Reintento: imagen no disponible para `{sku}`")
+            continue
+
+        try:
+            image_data = imagen_path.read_bytes()
+            img_b64    = base64.b64encode(image_data).decode("utf-8")
+            nombre     = prod.get("nombre") or prod.get("titulo") or sku
+
+            tmpl_ids = models.execute_kw(
+                odoo_db, uid, odoo_pass, "product.template", "search",
+                [[["name", "ilike", nombre[:30]]]], {"limit": 1}
+            )
+
+            if tmpl_ids:
+                models.execute_kw(odoo_db, uid, odoo_pass, "product.template", "write",
+                                  [tmpl_ids, {"default_code": sku, "image_1920": img_b64}])
+                pp_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "search",
+                                           [[["product_tmpl_id", "=", tmpl_ids[0]]]])
+                if pp_ids:
+                    models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
+                                      [pp_ids[:1], {"default_code": sku}])
+                subidas.append(sku)
+            else:
+                precio_usd     = _safe_float(prod.get("precio_usd"))
+                precio_mxn     = round(precio_usd * tipo_cambio, 2)
+                cbm_pz         = _safe_float(prod.get("cbm_por_pieza") or prod.get("cbm_master_carton"))
+                costo_unitario = round(precio_mxn + cbm_pz * costo_por_m3, 2)
+                cat_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.category", "search",
+                                            [[["name", "=", "Productos Agente"]]])
+                vals: dict = {
+                    "name":         nombre,
+                    "default_code": sku,
+                    "type":         "product",
+                    "sale_ok":      True,
+                    "purchase_ok":  True,
+                    "list_price":   costo_unitario,
+                    "image_1920":   img_b64,
+                }
+                if prod.get("descripcion"):
+                    vals["description_sale"] = prod["descripcion"]
+                if cat_ids:
+                    vals["categ_id"] = cat_ids[0]
+                models.execute_kw(odoo_db, uid, odoo_pass, "product.template", "create", [vals])
+                subidas.append(sku)
+        except Exception as e:
+            errores.append(f"Reintento fallido para `{sku}`: {e}")
+
+    return subidas, errores

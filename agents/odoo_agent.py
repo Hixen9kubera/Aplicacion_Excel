@@ -666,12 +666,11 @@ def _reintentar_skus_fallidos(
     productos: list[dict],
     tipo_cambio: float,
     costo_por_m3: float,
+    propuestas: list[dict] | None = None,
+    modo_prueba: bool = False,
 ) -> tuple[list[str], list[str]]:
     """
-    Para cada SKU que falló en _subir_productos_a_odoo, intenta:
-      1. Buscarlo en Odoo por nombre
-      2. Si lo encuentra → actualiza el default_code y sube la imagen
-      3. Si no lo encuentra → crea el producto y sube la imagen
+    Para cada SKU que no fue encontrado en Odoo, lo crea usando los datos de propuestas.
     Debe llamarse ANTES de borrar IMAGENES_TEMP_PATH.
     """
     import re as _re
@@ -701,14 +700,19 @@ def _reintentar_skus_fallidos(
     except Exception as e:
         return subidas, [f"No se pudo conectar a ODOO para reintento: {e}"]
 
+    prop_por_sku = {p.get("sku"): p for p in (propuestas or []) if p.get("sku")}
     prod_por_sku = {p.get("sku"): p for p in productos if p.get("sku")}
+    cat_nombre   = "PRUEBAS_AGENTE" if modo_prueba else "Productos Agente"
+    cat_cache: dict = {}
+
+    def _get_cat(nombre: str) -> int | None:
+        if nombre not in cat_cache:
+            ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.category", "search",
+                                    [[["name", "=", nombre]]])
+            cat_cache[nombre] = ids[0] if ids else None
+        return cat_cache[nombre]
 
     for sku in skus_fallidos:
-        prod = prod_por_sku.get(sku)
-        if not prod:
-            errores.append(f"Reintento: datos no encontrados para `{sku}`")
-            continue
-
         imagen_path = None
         for ext in ("jpg", "jpeg", "png", "webp"):
             candidate = IMAGENES_TEMP_PATH / f"{sku}.{ext}"
@@ -719,47 +723,88 @@ def _reintentar_skus_fallidos(
             errores.append(f"Reintento: imagen no disponible para `{sku}`")
             continue
 
+        prop = prop_por_sku.get(sku)
+        prod = (prop.get("producto") if prop else None) or prod_por_sku.get(sku)
+        if not prod:
+            errores.append(f"Reintento: datos no encontrados para `{sku}`")
+            continue
+
         try:
             image_data = imagen_path.read_bytes()
             img_b64    = base64.b64encode(image_data).decode("utf-8")
-            nombre     = prod.get("nombre") or prod.get("titulo") or sku
 
-            tmpl_ids = models.execute_kw(
-                odoo_db, uid, odoo_pass, "product.template", "search",
-                [[["name", "ilike", nombre[:30]]]], {"limit": 1}
-            )
+            nombre     = (prop.get("nombre") if prop else None) or prod.get("nombre") or sku
+            nombre_tmpl = nombre + ("_test" if modo_prueba else "")
+            att_tipo   = (prop.get("atributo_tipo") if prop else None) or "Variante"
+            att_valor  = (prop.get("atributo_valor") if prop else None) or "Estándar"
+            sku_padre  = (prop.get("padre_sku") if prop else None) or sku
+
+            precio_usd     = _safe_float(prod.get("precio_usd"))
+            precio_mxn     = round(precio_usd * tipo_cambio, 2)
+            cbm_pz         = _cbm_por_pieza_odoo(prod)
+            costo_unitario = round(precio_mxn + cbm_pz * costo_por_m3, 2)
+            cat_id         = _get_cat(cat_nombre)
+
+            # SKU del template: padre si es variante, propio si no
+            # Buscar si el producto ya existe por SKU (evita duplicados)
+            tmpl_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.template", "search",
+                                         [[["default_code", "=", sku_tmpl if sku == sku_padre else sku_padre]]])
+            if not tmpl_ids:
+                var_ids_chk = models.execute_kw(
+                    odoo_db, uid, odoo_pass, "product.product", "search_read",
+                    [[["default_code", "=", sku]]],
+                    {"fields": ["product_tmpl_id"], "limit": 1},
+                )
+                if var_ids_chk:
+                    tmpl_ids = [var_ids_chk[0]["product_tmpl_id"][0]]
 
             if tmpl_ids:
+                # Ya existe — solo sube la imagen
                 models.execute_kw(odoo_db, uid, odoo_pass, "product.template", "write",
-                                  [tmpl_ids, {"default_code": sku, "image_1920": img_b64}])
-                pp_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "search",
-                                           [[["product_tmpl_id", "=", tmpl_ids[0]]]])
-                if pp_ids:
-                    models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
-                                      [pp_ids[:1], {"default_code": sku}])
+                                  [tmpl_ids[:1], {"image_1920": img_b64}])
                 subidas.append(sku)
-            else:
-                precio_usd     = _safe_float(prod.get("precio_usd"))
-                precio_mxn     = round(precio_usd * tipo_cambio, 2)
-                cbm_pz         = _safe_float(prod.get("cbm_por_pieza") or prod.get("cbm_master_carton"))
-                costo_unitario = round(precio_mxn + cbm_pz * costo_por_m3, 2)
-                cat_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.category", "search",
-                                            [[["name", "=", "Productos Agente"]]])
-                vals: dict = {
-                    "name":         nombre,
-                    "default_code": sku,
-                    "type":         "product",
-                    "sale_ok":      True,
-                    "purchase_ok":  True,
-                    "list_price":   costo_unitario,
-                    "image_1920":   img_b64,
-                }
-                if prod.get("descripcion"):
-                    vals["description_sale"] = prod["descripcion"]
-                if cat_ids:
-                    vals["categ_id"] = cat_ids[0]
-                models.execute_kw(odoo_db, uid, odoo_pass, "product.template", "create", [vals])
-                subidas.append(sku)
+                continue
+
+            sku_tmpl = sku_padre if sku != sku_padre else sku
+            vals: dict = {
+                "name":         nombre_tmpl,
+                "default_code": sku_tmpl,
+                "type":         "product",
+                "sale_ok":      True,
+                "purchase_ok":  True,
+                "list_price":   costo_unitario,
+                "image_1920":   img_b64,
+            }
+            if prod.get("descripcion"):
+                vals["description_sale"] = prod["descripcion"]
+            if cat_id:
+                vals["categ_id"] = cat_id
+            tmpl_id = models.execute_kw(odoo_db, uid, odoo_pass, "product.template", "create", [vals])
+
+            # Si es variante, crear atributo y asignar SKU al product.product
+            if sku != sku_padre:
+                try:
+                    attr_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.attribute", "search",
+                                                 [[["name", "=", att_tipo]]])
+                    attr_id  = attr_ids[0] if attr_ids else models.execute_kw(
+                        odoo_db, uid, odoo_pass, "product.attribute", "create", [{"name": att_tipo}])
+                    val_ids  = models.execute_kw(odoo_db, uid, odoo_pass, "product.attribute.value", "search",
+                                                 [[["name", "=", att_valor], ["attribute_id", "=", attr_id]]])
+                    val_id   = val_ids[0] if val_ids else models.execute_kw(
+                        odoo_db, uid, odoo_pass, "product.attribute.value", "create",
+                        [{"name": att_valor, "attribute_id": attr_id}])
+                    models.execute_kw(odoo_db, uid, odoo_pass, "product.template.attribute.line", "create",
+                                      [{"product_tmpl_id": tmpl_id, "attribute_id": attr_id,
+                                        "value_ids": [(4, val_id)]}])
+                    var_ids = models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "search",
+                                                [[["product_tmpl_id", "=", tmpl_id]]])
+                    if var_ids:
+                        models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
+                                          [var_ids, {"default_code": sku}])
+                except Exception:
+                    pass  # fallo de atributo es no-fatal
+
+            subidas.append(sku)
         except Exception as e:
             errores.append(f"Reintento fallido para `{sku}`: {e}")
 

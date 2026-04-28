@@ -1053,9 +1053,15 @@ def generar_excel_tool(productos: List[dict] | None = None) -> str:
 
     # Reintentar SKUs que fallaron antes de borrar imágenes
     if errs_odoo:
-        _sub2, _err2 = _reintentar_skus_fallidos(errs_odoo, prods, tipo_cambio, costo_por_m3)
-        subidas  = subidas + _sub2
+        _propuestas_rt = st.session_state.pop("propuestas_para_reintento", None) or []
+        _sub2, _err2 = _reintentar_skus_fallidos(
+            errs_odoo, prods, tipo_cambio, costo_por_m3, _propuestas_rt,
+            modo_prueba=st.session_state.get("modo_prueba", False),
+        )
+        subidas   = subidas + _sub2
         errs_odoo = [e for e in errs_odoo if not any(s in e for s in _sub2)] + _err2
+    else:
+        st.session_state.pop("propuestas_para_reintento", None)
 
     # Limpiar imágenes temporales
     if IMAGENES_TEMP_PATH.exists():
@@ -2687,6 +2693,9 @@ if st.session_state.get("clasificacion_activa"):
                 _res_lines.append("\n⚠️ Odoo no conectado — productos no creados en el sistema.")
 
             st.session_state.chat.append({"role": "assistant", "content": "\n".join(_res_lines)})
+
+            # Guardar propuestas para reintento de SKUs fallidos en generar_excel_tool
+            st.session_state.propuestas_para_reintento = _props
 
             # Limpiar estado de clasificación y arrancar chat
             st.session_state.clasificacion_activa = False

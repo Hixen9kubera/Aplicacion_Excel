@@ -1939,12 +1939,11 @@ with tab_pl:
 
     # Scroll automático al último mensaje del chat
     if st.session_state.chat:
-        st.components.v1.html(
+        st.html(
             """<script>
             var main = window.parent.document.querySelector('section.main');
             if (main) main.scrollTo(0, main.scrollHeight);
-            </script>""",
-            height=0,
+            </script>"""
         )
 
 

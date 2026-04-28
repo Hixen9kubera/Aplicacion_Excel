@@ -912,6 +912,19 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
     resultados: list[str] = []
     errores:    list[str] = []
 
+    # Piezas totales extra que aportan los duplicados a su padre
+    piezas_extra_por_padre: dict[str, int] = {}
+    for _p in propuestas:
+        if "duplicado" in str(_p.get("accion", "")).lower():
+            _padre = _p.get("padre_sku") or ""
+            try:
+                piezas_extra_por_padre[_padre] = (
+                    piezas_extra_por_padre.get(_padre, 0)
+                    + int(float(_p["producto"].get("piezas_total") or 0))
+                )
+            except (ValueError, TypeError):
+                pass
+
     for prop in propuestas:
         if prop["accion"] == "duplicado":
             continue
@@ -938,6 +951,14 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                 # Para padre+variante: poner sku_padre en default_code del template
                 # Para padre solo: poner el sku directamente
                 sku_direct = sku_padre if accion == "crear_padre_y_variante" else sku
+                # Sumar piezas de duplicados al padre
+                _extra_pzs = piezas_extra_por_padre.get(sku_padre, 0)
+                if _extra_pzs > 0:
+                    try:
+                        _base_pzs = int(float(prod.get("piezas_total") or 0))
+                    except (ValueError, TypeError):
+                        _base_pzs = 0
+                    prod = {**prod, "piezas_total": _base_pzs + _extra_pzs}
                 vals = _build_vals(prod, nombre_tmpl, precio_usd,
                                    costo_unitario, sku_direct=sku_direct)
                 tmpl_id = models.execute_kw(
@@ -1041,11 +1062,16 @@ def generar_excel_tool(productos: List[dict] | None = None) -> str:
     cbm_total    = sum(_cbm_total_fila(p) for p in prods)
     costo_por_m3 = costo_contenedor / cbm_total if cbm_total > 0 else 0.0
 
+    # Excluir duplicados del upload a Odoo (nunca se crean, causarían falsos errores)
+    _props_prev  = st.session_state.get("propuestas_para_reintento") or []
+    _skus_dup    = {p["sku"] for p in _props_prev if "duplicado" in str(p.get("accion", "")).lower()}
+    prods_odoo   = [p for p in prods if p.get("sku") not in _skus_dup]
+
     # Generar Excels y subir a ODOO en paralelo
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         fut_excel  = executor.submit(generar_excel,        prods, tipo_cambio, contenedor)
         fut_master = executor.submit(generar_excel_master, prods, tipo_cambio, costo_contenedor, nombre_packing)
-        fut_odoo   = executor.submit(_subir_productos_a_odoo, prods, tipo_cambio, costo_por_m3)
+        fut_odoo   = executor.submit(_subir_productos_a_odoo, prods_odoo, tipo_cambio, costo_por_m3)
 
         excel_bytes        = fut_excel.result()
         master_bytes       = fut_master.result()

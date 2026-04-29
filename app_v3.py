@@ -909,6 +909,17 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
         models.execute_kw(odoo_db, uid, odoo_pass,
                           "product.template", "write", [[tmpl_id], {"description": nueva_desc}])
 
+    def _img_b64(sku: str) -> str | None:
+        """Lee la imagen del SKU desde la carpeta temporal y la devuelve en base64."""
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            p = IMAGENES_TEMP_PATH / f"{sku}.{ext}"
+            if p.exists():
+                try:
+                    return base64.b64encode(p.read_bytes()).decode("utf-8")
+                except Exception:
+                    return None
+        return None
+
     resultados: list[str] = []
     errores:    list[str] = []
 
@@ -961,6 +972,9 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                     prod = {**prod, "piezas_total": _base_pzs + _extra_pzs}
                 vals = _build_vals(prod, nombre_tmpl, precio_usd,
                                    costo_unitario, sku_direct=sku_direct)
+                img = _img_b64(sku)
+                if img:
+                    vals["image_1920"] = img
                 tmpl_id = models.execute_kw(
                     odoo_db, uid, odoo_pass, "product.template", "create", [vals])
                 templates_creados[sku_padre] = tmpl_id
@@ -1029,6 +1043,10 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                     models.execute_kw(odoo_db, uid, odoo_pass, "product.product", "write",
                                       [var_ids, {"default_code": sku}])
                 _write_campos_custom(tmpl_id, prod, precio_usd, cbm_pz)
+                img = _img_b64(sku)
+                if img:
+                    models.execute_kw(odoo_db, uid, odoo_pass,
+                                      "product.template", "write", [[tmpl_id], {"image_1920": img}])
                 if requiere_rev:
                     _apply_rev_tag_and_note(tmpl_id, nota_rev)
                 _rev_sfx = " ⚠️ rev" if requiere_rev else ""
@@ -1628,7 +1646,8 @@ if archivo is not None:
         st.session_state.odoo_conectado  = _odoo_conectado
         st.session_state.archivo_id  = archivo_id
         st.session_state["filename"] = archivo.name
-        st.session_state.contenedor_val = extraer_contenedor(archivo.name)
+        if not st.session_state.get("contenedor_val", "").strip():
+            st.session_state.contenedor_val = extraer_contenedor(archivo.name)
 
         file_bytes = archivo.read()
         st.session_state.file_bytes = file_bytes

@@ -2633,11 +2633,13 @@ if st.session_state.get("clasificacion_activa"):
 
             # ── Info del producto ─────────────────────────────────────────────
             with _c_info:
-                st.markdown(
-                    f"**{_prop['nombre']}**  \n"
-                    f"Base: *{_prop['nombre_base']}*  \n"
-                    f"`{_prop['sku']}` {_badge} {_prop['accion_display']}"
+                st.text_input(
+                    "Nombre",
+                    value=_prop["nombre_base"],
+                    key=f"_cls_nb_{_i}",
+                    label_visibility="collapsed",
                 )
+                st.caption(f"`{_prop['sku']}` {_badge} {_prop['accion_display']}")
                 if _prop.get("padre_sku") and _prop["padre_sku"] != _prop["sku"]:
                     st.caption(f"Padre: `{_prop['padre_sku']}`")
 
@@ -2692,6 +2694,21 @@ if st.session_state.get("clasificacion_activa"):
             for _i, _prop in enumerate(_props):
                 _prop["requiere_revision"] = bool(st.session_state.get(f"_cls_rev_{_i}", False))
                 _prop["nota_revision"]     = str(st.session_state.get(f"_cls_nota_{_i}", "") or "")
+                _nb_edit = str(st.session_state.get(f"_cls_nb_{_i}", "") or "").strip()
+                if _nb_edit:
+                    _prop["nombre_base"] = _nb_edit
+                    _prop["nombre"]      = _nb_edit
+
+            # Propagar nombre_base editado de padres a sus duplicados
+            _nb_por_padre = {
+                p["padre_sku"]: p["nombre_base"]
+                for p in _props
+                if p["accion"] != "duplicado" and p.get("padre_sku")
+            }
+            for _p in _props:
+                if _p["accion"] == "duplicado" and _p.get("padre_sku") in _nb_por_padre:
+                    _p["nombre_base"] = _nb_por_padre[_p["padre_sku"]]
+                    _p["nombre"]      = _nb_por_padre[_p["padre_sku"]]
 
             # ── Crear padres y variantes en Odoo ─────────────────────────────
             _odoo_ok = st.session_state.get("odoo_conectado", False)

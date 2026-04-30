@@ -445,16 +445,17 @@ def generar_excel_purchase(productos: list[dict], tipo_cambio: float,
         except (ValueError, TypeError):
             piezas_total = None
 
-        ws.cell(r, 1).value  = _purchase_id
-        ws.cell(r, 2).value  = _supplier
-        ws.cell(r, 3).value  = _currency
+        if i == 0:
+            ws.cell(r, 1).value  = _purchase_id
+            ws.cell(r, 2).value  = _supplier
+            ws.cell(r, 3).value  = _currency
+            ws.cell(r, 10).value = _date
         ws.cell(r, 4).value  = prod.get("sku", "")
         ws.cell(r, 5).value  = piezas_total
         ws.cell(r, 6).value  = _uom
         ws.cell(r, 7).value  = prod.get("descripcion", "")
         ws.cell(r, 8).value  = costo_unitario if costo_unitario > 0 else None
         ws.cell(r, 9).value  = None
-        ws.cell(r, 10).value = _date
 
     buf = io.BytesIO()
     wb.save(buf)

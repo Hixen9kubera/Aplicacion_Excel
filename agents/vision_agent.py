@@ -329,6 +329,7 @@ def _agente_vision_batch(
     idx_sin_imagen:  list[int]          = []
     phashes_batch:   dict[str, object]  = {}   # custom_id → phash_img
     datos_vision:    dict[int, dict]    = {}
+    phash_run:       dict[str, dict]    = {}   # phash_hex → resultado, dedup intra-run
 
     for i, prod in enumerate(productos):
         row_num = prod.get("fila_excel_0idx", i + 1)
@@ -337,9 +338,15 @@ def _agente_vision_batch(
             img_phash = _phash_imagen(img["data"])
             cached    = _buscar_en_cache(img_phash, cache_vision)
             if cached:
-                # Hit de caché → resultado gratis
+                # Hit de caché persistente → resultado gratis
                 datos_vision[i] = {k: cached.get(k, "") for k in _CAMPOS_CACHE}
                 datos_vision[i]["_error"] = None
+                continue
+
+            # Deduplicar dentro del mismo run (misma imagen, distinto producto)
+            phash_hex = str(img_phash) if img_phash is not None else None
+            if phash_hex and phash_hex in phash_run:
+                datos_vision[i] = phash_run[phash_hex].copy()
                 continue
 
             # Miss de caché → comprimir y agregar al batch
@@ -412,10 +419,9 @@ def _agente_vision_batch(
             datos_vision[idx] = datos
 
             if not datos.get("_error") and (ph := phashes_batch.get(result.custom_id)):
-                nuevos_cache.append({
-                    "phash_hex": str(ph),
-                    **{k: datos.get(k, "") for k in _CAMPOS_CACHE},
-                })
+                entry = {"phash_hex": str(ph), **{k: datos.get(k, "") for k in _CAMPOS_CACHE}}
+                nuevos_cache.append(entry)
+                phash_run[str(ph)] = {k: datos.get(k, "") for k in _CAMPOS_CACHE}
 
         n_done += len(chunk)
 
@@ -458,20 +464,42 @@ def _agente_vision_paralelo(
             datos.setdefault("atributo_desc", datos.get("atributo_cod", ""))
             return i, datos, None
 
+    # Pre-calcular phashes para deduplicar intra-run
+    phash_run:    dict[str, dict] = {}   # phash_hex → resultado ya obtenido
+    phash_by_idx: dict[int, str]  = {}   # idx → phash_hex
+    for i, prod in enumerate(productos):
+        row_num = prod.get("fila_excel_0idx", i + 1)
+        img = imagenes.get(row_num)
+        if img:
+            ph = _phash_imagen(img["data"])
+            if ph is not None:
+                phash_by_idx[i] = str(ph)
+
     datos_vision:  dict[int, dict] = {}
     nuevos_cache:  list[dict]      = []
     bloques = [list(enumerate(productos))[j: j + _BLOQUE_SIZE]
                for j in range(0, len(productos), _BLOQUE_SIZE)]
 
     for b_idx, bloque in enumerate(bloques):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=_BLOQUE_SIZE) as ex:
-            for i, datos, img_phash in ex.map(_procesar, bloque):
-                datos_vision[i] = datos
-                if img_phash and not datos.get("_error"):
-                    nuevos_cache.append({
-                        "phash_hex": str(img_phash),
-                        **{k: datos.get(k, "") for k in _CAMPOS_CACHE},
-                    })
+        # Filtrar los que ya tienen resultado por dedup intra-run
+        bloque_filtrado = []
+        for idx, prod in bloque:
+            ph = phash_by_idx.get(idx)
+            if ph and ph in phash_run:
+                datos_vision[idx] = phash_run[ph].copy()
+            else:
+                bloque_filtrado.append((idx, prod))
+
+        if bloque_filtrado:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_BLOQUE_SIZE) as ex:
+                for i, datos, img_phash in ex.map(_procesar, bloque_filtrado):
+                    datos_vision[i] = datos
+                    if img_phash and not datos.get("_error"):
+                        entry = {"phash_hex": str(img_phash),
+                                 **{k: datos.get(k, "") for k in _CAMPOS_CACHE}}
+                        nuevos_cache.append(entry)
+                        phash_run[str(img_phash)] = {k: datos.get(k, "") for k in _CAMPOS_CACHE}
+
         if b_idx < len(bloques) - 1:
             time.sleep(62)
 

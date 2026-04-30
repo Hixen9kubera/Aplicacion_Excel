@@ -1080,16 +1080,11 @@ def generar_excel_tool(productos: List[dict] | None = None) -> str:
     cbm_total    = sum(_cbm_total_fila(p) for p in prods)
     costo_por_m3 = costo_contenedor / cbm_total if cbm_total > 0 else 0.0
 
-    # Excluir duplicados del upload a Odoo (nunca se crean, causarían falsos errores)
-    _props_prev  = st.session_state.get("propuestas_para_reintento") or []
-    _skus_dup    = {p["sku"] for p in _props_prev if "duplicado" in str(p.get("accion", "")).lower()}
-    prods_odoo   = [p for p in prods if p.get("sku") not in _skus_dup]
-
     # Generar Excels y subir a ODOO en paralelo
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         fut_excel  = executor.submit(generar_excel,        prods, tipo_cambio, contenedor)
         fut_master = executor.submit(generar_excel_master, prods, tipo_cambio, costo_contenedor, nombre_packing)
-        fut_odoo   = executor.submit(_subir_productos_a_odoo, prods_odoo, tipo_cambio, costo_por_m3)
+        fut_odoo   = executor.submit(_subir_productos_a_odoo, prods, tipo_cambio, costo_por_m3)
 
         excel_bytes        = fut_excel.result()
         master_bytes       = fut_master.result()
@@ -2710,6 +2705,10 @@ if st.session_state.get("clasificacion_activa"):
                     _p["nombre_base"] = _nb_por_padre[_p["padre_sku"]]
                     _p["nombre"]      = _nb_por_padre[_p["padre_sku"]]
 
+            # Renombrar imágenes ANTES de subir a Odoo (pueden estar con stem original)
+            _, _errs_ren_c = renombrar_imagenes_con_sku(_productos_c)
+            _reportar_errores_imagenes(_errs_ren_c, "renombrado de imágenes")
+
             # ── Crear padres y variantes en Odoo ─────────────────────────────
             _odoo_ok = st.session_state.get("odoo_conectado", False)
             _res_odoo: list[str] = []
@@ -2760,10 +2759,6 @@ if st.session_state.get("clasificacion_activa"):
 
             # Limpiar estado de clasificación y arrancar chat
             st.session_state.clasificacion_activa = False
-
-            # Renombrar imágenes temp con los SKUs definitivos
-            _, _errs_ren_c = renombrar_imagenes_con_sku(_productos_c)
-            _reportar_errores_imagenes(_errs_ren_c, "renombrado de imágenes")
 
             with st.spinner("Iniciando el agente..."):
                 _n_imgs_c = st.session_state.get("n_imgs_procesadas", 0)

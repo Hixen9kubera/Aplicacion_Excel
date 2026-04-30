@@ -265,8 +265,8 @@ def leer_productos(file_bytes: bytes, columnas: dict, fila_encabezado: int = 1) 
             return cell_val(row_num, i, row) if i is not None else None
 
         prod = {
-            "nombre":            val("nombre_producto"),
-            "nombre_alt":        val("nombre_producto_alt"),
+            "nombre":            str(val("nombre_producto") or "").strip() or None,
+            "nombre_alt":        str(val("nombre_producto_alt") or "").strip() or None,
             "id_guia":           val("id_guia"),
             "cajas_master":      val("cajas_master"),
             "piezas_x_caja":     val("piezas_x_caja"),

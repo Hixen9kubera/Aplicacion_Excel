@@ -542,8 +542,8 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         datos   = datos_vision[i]
         clas    = clasificaciones[i] if i < len(clasificaciones) else {}
         row_num = prod.get("fila_excel_0idx", i + 1)
-        nombre      = prod.get("nombre") or f"Producto {i+1}"
-        nombre_base = (clas.get("nombre_base") or nombre).strip()
+        nombre      = str(prod.get("nombre") or f"Producto {i+1}").strip()
+        nombre_base = str(clas.get("nombre_base") or nombre).strip()
         att_tipo    = clas.get("atributo_tipo")
         att_valor   = clas.get("atributo_valor")
         att_cod     = _atributo_cod_desde_valor(att_valor) or datos.get("atributo_cod")

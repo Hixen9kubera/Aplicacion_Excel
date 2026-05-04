@@ -530,6 +530,32 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
     registro: dict[str, dict] = {}
     propuestas: list[dict] = []
 
+    # Pre-computar phashes intra-packing para agrupar productos con imagen idéntica
+    _phashes_pl: list[tuple[object, str]] = []  # [(phash_obj, nombre_base)]
+    _phash_override: dict[int, str] = {}        # idx → nombre_base forzado por imagen
+    for _ii, _pp in enumerate(productos):
+        _img_p = _pp.get("imagen_temp_path")
+        if not _img_p:
+            continue
+        from pathlib import Path as _Path
+        if not _Path(_img_p).exists():
+            continue
+        try:
+            _ph = _phash_imagen(_Path(_img_p).read_bytes())
+            if _ph is None:
+                continue
+            _clas_ii = clasificaciones[_ii] if _ii < len(clasificaciones) else {}
+            _nom_ii  = str(_pp.get("nombre") or f"Producto {_ii+1}").strip()
+            _nb_ii   = str(_clas_ii.get("nombre_base") or _nom_ii).strip()
+            for _ph_prev, _nb_prev in _phashes_pl:
+                if _ph - _ph_prev <= 3:
+                    _phash_override[_ii] = _nb_prev
+                    break
+            else:
+                _phashes_pl.append((_ph, _nb_ii))
+        except Exception:
+            pass
+
     ACCION_LABELS = {
         "crear_padre_y_variante": "🆕 Padre nuevo + variante nueva",
         "crear_padre_solo":       "🆕 Padre nuevo (sin variante)",
@@ -543,7 +569,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         clas    = clasificaciones[i] if i < len(clasificaciones) else {}
         row_num = prod.get("fila_excel_0idx", i + 1)
         nombre      = str(prod.get("nombre") or f"Producto {i+1}").strip()
-        nombre_base = str(clas.get("nombre_base") or nombre).strip()
+        nombre_base = _phash_override.get(i) or str(clas.get("nombre_base") or nombre).strip()
         att_tipo    = clas.get("atributo_tipo")
         att_valor   = clas.get("atributo_valor")
         att_cod     = _atributo_cod_desde_valor(att_valor) or datos.get("atributo_cod")

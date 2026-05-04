@@ -253,14 +253,6 @@ def leer_productos(file_bytes: bytes, columnas: dict, fila_encabezado: int = 1) 
     productos, advertencias = [], []
     primera_fila_datos = fila_encabezado + 1
 
-    # Columnas numéricas que deben tener valor en cualquier fila real de producto.
-    # Las filas etiqueta/material solo tienen texto en la columna nombre → se descartan.
-    _CAMPOS_CLAVE_NUM = (
-        "cajas_master", "piezas_total", "piezas_x_caja",
-        "precio_usd", "cbm_por_pieza", "cbm_master_carton", "cbm_total_sku",
-    )
-    _cols_num_mapeadas = [c for c in _CAMPOS_CLAVE_NUM if idx(c) is not None]
-
     for row_num, row in enumerate(
         ws.iter_rows(min_row=primera_fila_datos, values_only=True),
         start=primera_fila_datos,
@@ -306,12 +298,6 @@ def leer_productos(file_bytes: bytes, columnas: dict, fila_encabezado: int = 1) 
                     prod[_cn] = float(_v.replace(",", ".").strip())
                 except (ValueError, TypeError):
                     prod[_cn] = None
-
-        # Descartar filas etiqueta: tienen texto en el nombre pero ningún dato
-        # numérico de producto (ocurre p.ej. cuando una imagen flotante no está
-        # alineada a la celda y la fila de material/categoría adyacente adquiere valor).
-        if _cols_num_mapeadas and not any(prod.get(c) for c in _cols_num_mapeadas):
-            continue
 
         nombre = prod["nombre"]
         if row_num not in secondary_merged_rows:
@@ -556,19 +542,29 @@ def guardar_imagenes_temp(imagenes: dict[int, dict], productos: list[dict]) -> t
     fila_a_idx = {p.get("fila_excel_0idx"): i for i, p in enumerate(productos)
                   if p.get("fila_excel_0idx") is not None}
 
+    _CAMPOS_SCORE = (
+        "cajas_master", "piezas_total", "piezas_x_caja",
+        "precio_usd", "cbm_por_pieza", "cbm_master_carton", "cbm_total_sku",
+    )
+
+    def _score(p: dict) -> int:
+        return sum(1 for c in _CAMPOS_SCORE if p.get(c))
+
     guardadas = 0
     for row_num, img in imagenes.items():
-        prod_idx = fila_a_idx.get(row_num)
-        if prod_idx is None:
-            # Imagen flotante cuyo ancla XML no cayó exactamente en la fila del
-            # producto → buscar el producto más cercano sin imagen (±3 filas).
-            for delta in (-1, 1, -2, 2, -3, 3):
-                candidate = fila_a_idx.get(row_num + delta)
-                if candidate is not None and "imagen_temp_stem" not in productos[candidate]:
-                    prod_idx = candidate
-                    break
-        if prod_idx is None:
+        # Buscar candidato en ±3 filas sin imagen ya asignada.
+        # Prioridad: más datos numéricos primero (producto real > fila etiqueta),
+        # distancia como desempate.
+        candidates: list[tuple[int, int, int]] = []
+        for delta in range(-3, 4):
+            candidate = fila_a_idx.get(row_num + delta)
+            if candidate is not None and "imagen_temp_stem" not in productos[candidate]:
+                candidates.append((-_score(productos[candidate]), abs(delta), candidate))
+
+        if not candidates:
             continue
+        candidates.sort()
+        prod_idx = candidates[0][2]
         nombre = productos[prod_idx].get("nombre", f"producto_{prod_idx + 1}")
         nombre_archivo = f"{row_num}_{_sanitizar_nombre_archivo(nombre)}"
         ruta = IMAGENES_TEMP_PATH / f"{nombre_archivo}.{img['ext']}"

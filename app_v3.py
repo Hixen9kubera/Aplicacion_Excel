@@ -65,7 +65,7 @@ from agents.nombres_agent import (
     agente_nombres,
 )
 from agents.utils import _phash_imagen, _similitud_nombres
-from agents.graph import ejecutar_vision_y_nombres
+from agents.graph import ejecutar_vision_y_nombres, ejecutar_solo_nombres, ejecutar_vision_bloque_desde_disco
 from agents.excel_agent import (
     generar_excel, generar_excel_master, generar_excel_purchase,
     generar_reporte_clasificacion,
@@ -491,7 +491,7 @@ def _atributo_cod_desde_valor(atributo_valor: str | None) -> str | None:
     return atributo_valor[:3].upper()
 
 
-def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> list[dict]:
+def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], modo_fase1: bool = False) -> list[dict]:
     """
     Análisis unificado padre/variante para todos los productos del packing list.
     Reemplaza la detección de duplicados + la detección de conflictos SKU.
@@ -517,9 +517,12 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
         guardar_imagenes_temp(imagenes, productos)
 
     # ── Pasos 1+2: Vision y Nombres en PARALELO (LangGraph fan-out) ─────────
-    # ejecutar_vision_y_nombres corre agente_vision y _extraer_nombre_base_atributo_batch
-    # concurrentemente en un thread pool gestionado por LangGraph.
-    datos_vision, clasificaciones = ejecutar_vision_y_nombres(productos, imagenes)
+    if modo_fase1:
+        # Solo texto — rápido, sin llamadas Vision. Los títulos/descripciones quedan vacíos.
+        datos_vision, clasificaciones = ejecutar_solo_nombres(productos)
+    else:
+        # Vision completa — lento para listas grandes.
+        datos_vision, clasificaciones = ejecutar_vision_y_nombres(productos, imagenes)
 
     # Liberar bytes de imágenes — ya están en disco y ya se usaron para Vision
     del imagenes
@@ -530,9 +533,13 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
     registro: dict[str, dict] = {}
     propuestas: list[dict] = []
 
-    # Pre-computar phashes intra-packing para agrupar productos con imagen idéntica
-    _phashes_pl: list[tuple[object, str]] = []  # [(phash_obj, nombre_base)]
-    _phash_override: dict[int, str] = {}        # idx → nombre_base forzado por imagen
+    # Pre-computar phashes intra-packing
+    # _phash_override: imagen idéntica → forzar mismo nombre_base (ya existía)
+    # _phash_by_idx:   phash por índice, para detectar productos visualmente distintos
+    _UMBRAL_SPLIT = 15   # distancia phash > 15 → productos diferentes aunque mismo nombre_base
+    _phashes_pl:    list[tuple[object, str]] = []  # [(phash_obj, nombre_base)]
+    _phash_override: dict[int, str]  = {}          # idx → nombre_base forzado por imagen idéntica
+    _phash_by_idx:   dict[int, object] = {}        # idx → phash_obj
     for _ii, _pp in enumerate(productos):
         _img_p = _pp.get("imagen_temp_path")
         if not _img_p:
@@ -544,6 +551,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
             _ph = _phash_imagen(_Path(_img_p).read_bytes())
             if _ph is None:
                 continue
+            _phash_by_idx[_ii] = _ph
             _clas_ii = clasificaciones[_ii] if _ii < len(clasificaciones) else {}
             _nom_ii  = str(_pp.get("nombre") or f"Producto {_ii+1}").strip()
             _nb_ii   = str(_clas_ii.get("nombre_base") or _nom_ii).strip()
@@ -597,7 +605,22 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
             "requiere_revision": False,
             "nota_revision":   "",
             "duplicado_de_idx": None,
+            "_vision_pendiente": bool(datos.get("_vision_pendiente")),
         }
+
+        # ── Verificar que imagen es similar al padre registrado ───────────────
+        # Si mismo nombre_base pero imágenes visualmente distintas → padre separado
+        if nombre_base in registro:
+            _ph_actual = _phash_by_idx.get(i)
+            _ph_padre  = registro[nombre_base].get("padre_phash")
+            if _ph_actual is not None and _ph_padre is not None:
+                if _ph_actual - _ph_padre > _UMBRAL_SPLIT:
+                    # Imágenes demasiado distintas para ser el mismo producto
+                    _sfx = 1
+                    while f"{nombre_base}#{_sfx}" in registro:
+                        _sfx += 1
+                    nombre_base = f"{nombre_base}#{_sfx}"
+                    prop["nombre_base"] = nombre_base
 
         if nombre_base in registro:
             # ── Padre ya en registro local ─────────────────────────────────
@@ -667,6 +690,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
                     "sku_padre": sku_odoo, "subcod": sub_odoo, "numero": num_odoo,
                     "odoo_id": prod_odoo.get("id"), "odoo_nombre": prod_odoo.get("name", ""),
                     "padre_idx": i,
+                    "padre_phash": _phash_by_idx.get(i),
                     "variantes": {att_cod: {"sku": prop["sku"], "idx": i}} if att_cod else {},
                 }
             else:
@@ -691,6 +715,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
                     "sku_padre": sku_padre, "subcod": sub_cod, "numero": num_nuevo,
                     "odoo_id": None, "odoo_nombre": "",
                     "padre_idx": i,
+                    "padre_phash": _phash_by_idx.get(i),
                     "variantes": {att_cod: {"sku": prop["sku"], "idx": i}} if att_cod else {},
                 }
 
@@ -718,6 +743,36 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict]) -> 
 
     del datos_vision
     return propuestas
+
+
+def enriquecer_vision_bloque(offset: int, block_size: int = 50) -> None:
+    """
+    Fase 2: delega Vision al agente y actualiza propuestas en session_state.
+    Solo toca campos visuales (titulo, descripcion, categoria, atributo_desc);
+    no regenera SKUs para no romper relaciones de Fase 1.
+    """
+    propuestas = st.session_state.clasificacion_propuestas
+    productos  = st.session_state.productos
+
+    datos_bloque = ejecutar_vision_bloque_desde_disco(productos, offset, block_size)
+
+    for global_i, datos in datos_bloque.items():
+        if global_i >= len(propuestas):
+            continue
+        prop = propuestas[global_i]
+        prop["datos_vision"].update({
+            "titulo":        datos.get("titulo", ""),
+            "descripcion":   datos.get("descripcion", ""),
+            "categoria":     datos.get("categoria", ""),
+            "atributo_desc": datos.get("atributo_desc", ""),
+        })
+        prod = prop["producto"]
+        prod.update({
+            "descripcion": datos.get("descripcion", ""),
+            "categoria":   datos.get("categoria", ""),
+            "titulo":      datos.get("titulo") or prod.get("nombre", ""),
+        })
+        prop["_vision_pendiente"] = False
 
 
 def crear_clasificacion_en_odoo(propuestas: list[dict],
@@ -1218,6 +1273,7 @@ defaults = {
     "clasificacion_activa":    False,
     "clasificacion_propuestas": [],
     "clasificacion_reporte_bytes": None,
+    "vision_bloque_offset":    0,
     "duplicados_pendientes":   [],
     "dup_grupos_segunda":      [],      # grupos encontrados en segunda vuelta de detección
     "imagenes_excel":          {},      # {row_0idx: {data, ext}} extraídas antes de duplicados
@@ -1756,12 +1812,13 @@ if archivo is not None:
                     productos = corregir_cbm_inner(productos, advertencias, file_bytes, analisis["columnas"])
                     with st.spinner("Traduciendo y normalizando nombres..."):
                         productos = normalizar_nombres_productos(productos)
-                    with st.spinner("Analizando clasificación de productos (padres, variantes, duplicados)..."):
-                        propuestas = analizar_clasificacion_packing(file_bytes, productos)
+                    with st.spinner("Clasificando productos (Fase 1 — texto)..."):
+                        propuestas = analizar_clasificacion_packing(file_bytes, productos, modo_fase1=True)
                     st.session_state.clasificacion_propuestas  = propuestas
                     st.session_state.clasificacion_activa      = True
                     st.session_state.productos                 = productos
                     st.session_state.advertencias_productos    = advertencias
+                    st.session_state.vision_bloque_offset      = 0
 
             except Exception as e:
                 st.session_state.chat.append({"role": "assistant", "content": f"Error al analizar: {e}"})
@@ -2081,12 +2138,13 @@ if st.session_state.esperando_dudas:
                 productos = corregir_cbm_inner(productos, advertencias, st.session_state.file_bytes, columnas_actualizadas)
                 with st.spinner("Traduciendo y normalizando nombres..."):
                     productos = normalizar_nombres_productos(productos)
-                with st.spinner("Analizando clasificación de productos (padres, variantes, duplicados)..."):
-                    propuestas = analizar_clasificacion_packing(st.session_state.file_bytes, productos)
+                with st.spinner("Clasificando productos (Fase 1 — texto)..."):
+                    propuestas = analizar_clasificacion_packing(st.session_state.file_bytes, productos, modo_fase1=True)
                 st.session_state.clasificacion_propuestas  = propuestas
                 st.session_state.clasificacion_activa      = True
                 st.session_state.productos                 = productos
                 st.session_state.advertencias_productos    = advertencias
+                st.session_state.vision_bloque_offset      = 0
 
                 st.rerun()
 
@@ -2592,6 +2650,39 @@ if st.session_state.get("clasificacion_activa"):
         ]):
             with _sum_cols[_ci]:
                 st.metric(_lbl, _acc_counts.get(_acc, 0))
+
+        # ── Fase 2: Enriquecer con Vision (títulos, descripciones, imágenes) ────
+        _n_pendiente = sum(1 for _p in _props if _p.get("_vision_pendiente"))
+        if _n_pendiente > 0:
+            _v_offset    = st.session_state.get("vision_bloque_offset", 0)
+            _v_blocksize = 50
+            _n_total_v   = len(_props)
+            _pct_done    = max(0, _v_offset) / _n_total_v if _n_total_v else 1.0
+            with st.container(border=True):
+                st.markdown(
+                    f"**🔍 Análisis de imágenes pendiente** — {_n_pendiente} producto(s) sin título/descripción. "
+                    "Pulsa el botón para enriquecer el siguiente bloque de 50 con Vision."
+                )
+                st.progress(_pct_done, text=f"{_v_offset}/{_n_total_v} productos analizados con Vision")
+                _v_col1, _v_col2 = st.columns([2, 1])
+                with _v_col1:
+                    if st.button(
+                        f"🔍 Analizar imágenes (bloque {_v_offset // _v_blocksize + 1})",
+                        use_container_width=True,
+                        key="btn_vision_bloque",
+                    ):
+                        with st.spinner(f"Analizando productos {_v_offset + 1}–{min(_v_offset + _v_blocksize, _n_total_v)} con Vision..."):
+                            try:
+                                enriquecer_vision_bloque(_v_offset, _v_blocksize)
+                                st.session_state.vision_bloque_offset = _v_offset + _v_blocksize
+                            except Exception as _ve:
+                                st.error(f"Error en Vision: {_ve}")
+                        st.rerun()
+                with _v_col2:
+                    if st.button("⏭️ Saltar Vision", use_container_width=True, key="btn_skip_vision"):
+                        for _pp in _props:
+                            _pp["_vision_pendiente"] = False
+                        st.rerun()
 
         st.divider()
 

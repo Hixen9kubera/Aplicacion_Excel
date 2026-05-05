@@ -287,36 +287,66 @@ def _buscar_padre_en_odoo_por_nombre(
 # ── Carga desde Odoo ──────────────────────────────────────────────────────────
 
 def cargar_skus_odoo(url: str, db: str, username: str, password: str) -> tuple[list[str], str | None]:
-    """Obtiene todos los SKUs (default_code) de Odoo via XML-RPC."""
+    """
+    Obtiene todos los SKUs (default_code) de Odoo via XML-RPC.
+    Lee tanto product.template (SKU padre) como product.product (SKU variante)
+    para que validar_sku_vs_odoo detecte colisiones en ambos niveles.
+    """
     try:
-        common    = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
-        uid       = common.authenticate(db, username, password, {})
+        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
+        uid    = common.authenticate(db, username, password, {})
         if not uid:
             return [], "Credenciales inválidas o usuario sin acceso."
-        models    = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
-        productos = models.execute_kw(
+        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
+
+        tmpls = models.execute_kw(
             db, uid, password,
             "product.template", "search_read",
             [[["default_code", "!=", False]]],
             {"fields": ["default_code"], "limit": 0},
         )
-        return [p["default_code"] for p in productos if p.get("default_code")], None
+        vars_ = models.execute_kw(
+            db, uid, password,
+            "product.product", "search_read",
+            [[["default_code", "!=", False]]],
+            {"fields": ["default_code"], "limit": 0},
+        )
+        skus = set()
+        for rec in tmpls + vars_:
+            if rec.get("default_code"):
+                skus.add(rec["default_code"])
+        return sorted(skus), None
     except Exception as e:
         return [], str(e)
 
 
 def cargar_todos_productos_odoo(url: str, db: str, username: str, password: str) -> list[dict]:
-    """Carga nombre, SKU e imagen de todos los productos con SKU en Odoo."""
+    """
+    Carga nombre, SKU e imagen solo de productos en categoría 'Productos Agente'.
+    Únicamente estos son candidatos a padre en la clasificación — así se evita heredar
+    datos incorrectos de productos creados manualmente fuera del agente.
+    cargar_skus_odoo sigue cargando todos los SKUs (de cualquier categoría) para evitar
+    colisiones de SKU.
+    """
     try:
         common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
         uid    = common.authenticate(db, username, password, {})
         if not uid:
             return []
         models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
+
+        cat_ids = models.execute_kw(
+            db, uid, password,
+            "product.category", "search",
+            [[["name", "=", "Productos Agente"]]],
+        )
+        if not cat_ids:
+            return []  # Todavía no hay productos creados por el agente
+
         return models.execute_kw(
             db, uid, password,
             "product.template", "search_read",
-            [[["default_code", "!=", False]]],
+            [[["default_code", "!=", False], ["categ_id", "in", cat_ids]]],
             {"fields": ["default_code", "name", "image_128"], "limit": 0},
         )
     except Exception:

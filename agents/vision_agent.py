@@ -30,7 +30,7 @@ from langchain_core.messages import HumanMessage
 from agents.utils import _phash_imagen
 
 # Usar Batch API cuando hay más de este número de productos con imagen
-BATCH_THRESHOLD = 12
+BATCH_THRESHOLD = 40
 
 
 def _comprimir_imagen(data: bytes, max_px: int = 1024, quality: int = 85) -> tuple[bytes, str]:
@@ -399,7 +399,7 @@ def _agente_vision_batch(
     for chunk in chunks:
         batch = client.messages.batches.create(requests=chunk)
 
-        poll_interval = 30
+        poll_interval = 10
         while batch.processing_status == "in_progress":
             time.sleep(poll_interval)
             batch   = client.messages.batches.retrieve(batch.id)

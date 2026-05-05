@@ -707,6 +707,58 @@ def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
     return resultados
 
 
+_CHUNK_CATEGORIAS = 50
+
+
+def _inferir_categorias_batch(productos: list[dict]) -> list[dict]:
+    """
+    Infiere subcategoria_cod y atributo_cod para todos los productos en batch.
+    Un call a Haiku por cada 50 productos (sin imágenes — solo nombre/material/uso).
+    Devuelve lista en el mismo orden que productos.
+    """
+    if not productos:
+        return []
+
+    _vacio = {"subcategoria_cod": "VAR", "atributo_cod": "EST"}
+    resultados: list[dict] = []
+
+    for inicio in range(0, len(productos), _CHUNK_CATEGORIAS):
+        chunk = productos[inicio: inicio + _CHUNK_CATEGORIAS]
+        lineas = [
+            f"{j}: {p.get('nombre') or p.get('titulo') or f'Producto {j+1}'}"
+            f" | material={p.get('material') or '—'}"
+            f" | uso={p.get('uso') or '—'}"
+            for j, p in enumerate(chunk)
+        ]
+        prompt = (
+            "Clasifica cada producto ferretero/hogar para generar un SKU.\n"
+            "Devuelve SOLO un JSON array en el mismo orden, sin texto adicional:\n"
+            "[{\"subcategoria_cod\": \"XXX\", \"atributo_cod\": \"YYY\"}, ...]\n"
+            "subcategoria_cod: 2-4 letras mayúsculas (tipo producto, ej: MES, SIL, CAJ, BOL, CES, TIN)\n"
+            "atributo_cod: 2-4 letras mayúsculas (color/material, ej: NGR, BLC, NAT, GEN, RJO)\n\n"
+            "Productos:\n" + "\n".join(lineas)
+        )
+        try:
+            llm  = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=_CHUNK_CATEGORIAS * 35)
+            resp = llm.invoke([HumanMessage(content=prompt)])
+            content = resp.content
+            if isinstance(content, list):
+                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+            content = content.strip()
+            start = content.find("[")
+            end   = content.rfind("]") + 1
+            if start >= 0 and end > start:
+                content = content[start:end]
+            parcial = json.loads(content)
+        except Exception:
+            parcial = []
+        while len(parcial) < len(chunk):
+            parcial.append(_vacio)
+        resultados.extend(parcial[:len(chunk)])
+
+    return resultados
+
+
 # ── Nodo LangGraph ─────────────────────────────────────────────────────────────
 
 def agente_nombres(productos: list[dict]) -> dict:

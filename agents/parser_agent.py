@@ -462,12 +462,20 @@ def corregir_cbm_inner(productos: list[dict], advertencias: list[str],
 
 def extraer_imagenes_excel(file_bytes: bytes) -> dict[int, dict]:
     """
-    Extrae imágenes flotantes del Excel leyendo el XML de posicionamiento.
+    Extrae imágenes del Excel.  Soporta dos formatos:
+    1. Drawings flotantes (ancla XML xdr:from/row)
+    2. Imágenes embebidas en celda — formato XLRICHVALUE (Excel moderno / WPS)
     Devuelve dict {row_0indexed: {data, ext}}.
     """
-    NS_XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
-    NS_A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
-    NS_R   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    NS_XDR  = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+    NS_A    = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    NS_R    = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    NS_M    = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    NS_XLRD = "http://schemas.microsoft.com/office/spreadsheetml/2017/richdata"
+    NS_RVR  = "http://schemas.microsoft.com/office/spreadsheetml/2022/richvaluerel"
+    NS_PKG  = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+    _EXTS_OK = ("png", "jpg", "jpeg", "gif", "bmp", "webp")
 
     resultado: dict[int, dict] = {}
 
@@ -475,25 +483,23 @@ def extraer_imagenes_excel(file_bytes: bytes) -> dict[int, dict]:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
             nombres = set(z.namelist())
 
+            # ── Formato 1: drawings flotantes ─────────────────────────────────
             drawing_paths = sorted(
                 n for n in nombres
                 if re.match(r"xl/drawings/drawing\d+\.xml$", n)
             )
-
             for drawing_path in drawing_paths:
-                parts      = drawing_path.rsplit("/", 1)
-                rels_path  = f"{parts[0]}/_rels/{parts[1]}.rels"
+                parts     = drawing_path.rsplit("/", 1)
+                rels_path = f"{parts[0]}/_rels/{parts[1]}.rels"
                 if rels_path not in nombres:
                     continue
-
                 rels_tree  = ET.fromstring(z.read(rels_path))
                 rid_a_ruta = {}
                 for rel in rels_tree:
                     rid    = rel.get("Id")
                     target = rel.get("Target", "")
                     if "media" in target:
-                        ruta = target.replace("../", "xl/")
-                        rid_a_ruta[rid] = ruta
+                        rid_a_ruta[rid] = target.replace("../", "xl/")
 
                 drawing_tree = ET.fromstring(z.read(drawing_path))
                 for anchor in drawing_tree:
@@ -501,25 +507,83 @@ def extraer_imagenes_excel(file_bytes: bytes) -> dict[int, dict]:
                     if row_el is None:
                         continue
                     row_num = int(row_el.text)
-
                     blip = anchor.find(
                         f".//{{{NS_XDR}}}pic/{{{NS_XDR}}}blipFill/{{{NS_A}}}blip"
                     )
                     if blip is None:
                         continue
-                    rid = blip.get(f"{{{NS_R}}}embed")
-                    if not rid or rid not in rid_a_ruta:
-                        continue
-
-                    ruta = rid_a_ruta[rid]
-                    if ruta not in nombres:
+                    rid  = blip.get(f"{{{NS_R}}}embed")
+                    ruta = rid_a_ruta.get(rid, "")
+                    if not ruta or ruta not in nombres:
                         continue
                     ext = Path(ruta).suffix.lower().lstrip(".")
-                    if ext not in ("png", "jpg", "jpeg", "gif", "bmp", "webp"):
-                        continue
-
-                    if row_num not in resultado:
+                    if ext in _EXTS_OK and row_num not in resultado:
                         resultado[row_num] = {"data": z.read(ruta), "ext": ext}
+
+            # ── Formato 2: imágenes embebidas en celda (XLRICHVALUE) ──────────
+            _RV_PATH   = "xl/richData/rdrichvalue.xml"
+            _RVR_PATH  = "xl/richData/richValueRel.xml"
+            _RVRL_PATH = "xl/richData/_rels/richValueRel.xml.rels"
+            _META_PATH = "xl/metadata.xml"
+            _WS_PATH   = "xl/worksheets/sheet1.xml"
+            if all(p in nombres for p in (_RV_PATH, _RVR_PATH, _RVRL_PATH, _META_PATH, _WS_PATH)):
+                try:
+                    # rel_list: posición 0-indexed → rId
+                    rvr_xml  = ET.fromstring(z.read(_RVR_PATH))
+                    rel_list = [r.get(f"{{{NS_R}}}id") for r in rvr_xml.findall(f"{{{NS_RVR}}}rel")]
+
+                    # rId → ruta de imagen
+                    rvrl_xml  = ET.fromstring(z.read(_RVRL_PATH))
+                    rid_a_img = {
+                        r.get("Id"): r.get("Target", "").replace("../", "xl/")
+                        for r in rvrl_xml
+                    }
+
+                    # rv[i] → índice en rel_list (primer elemento <v>)
+                    rv_ns  = NS_XLRD
+                    rv_xml = ET.fromstring(z.read(_RV_PATH))
+                    rv_to_rel: dict[int, int] = {}
+                    for idx, rv_el in enumerate(rv_xml.findall(f"{{{rv_ns}}}rv")):
+                        vals = rv_el.findall(f"{{{rv_ns}}}v")
+                        if vals:
+                            try:
+                                rv_to_rel[idx] = int(vals[0].text)
+                            except (ValueError, TypeError):
+                                pass
+
+                    # vm_idx (1-based) → rvb_i
+                    meta_xml  = ET.fromstring(z.read(_META_PATH))
+                    bk_list   = meta_xml.findall(f".//{{{NS_M}}}bk")
+                    vm_to_rvb: dict[int, int] = {}
+                    for bk_idx, bk in enumerate(bk_list):
+                        rvb = bk.find(f".//{{{NS_XLRD}}}rvb")
+                        if rvb is not None:
+                            try:
+                                vm_to_rvb[bk_idx + 1] = int(rvb.get("i", -1))
+                            except (ValueError, TypeError):
+                                pass
+
+                    # Recorrer celdas de la hoja con atributo vm
+                    ws_text = z.read(_WS_PATH).decode("utf-8")
+                    for m in re.finditer(r'<c r="([A-Z]+)(\d+)"[^>]*\bvm="(\d+)"', ws_text):
+                        row_1idx = int(m.group(2))
+                        row_0idx = row_1idx - 1   # 0-indexed, mismo sistema que drawings
+                        vm       = int(m.group(3))
+                        rvb      = vm_to_rvb.get(vm)
+                        if rvb is None:
+                            continue
+                        rel_idx = rv_to_rel.get(rvb)
+                        if rel_idx is None or rel_idx >= len(rel_list):
+                            continue
+                        rid  = rel_list[rel_idx]
+                        ruta = rid_a_img.get(rid, "")
+                        if not ruta or ruta not in nombres:
+                            continue
+                        ext = Path(ruta).suffix.lower().lstrip(".")
+                        if ext in _EXTS_OK and row_0idx not in resultado:
+                            resultado[row_0idx] = {"data": z.read(ruta), "ext": ext}
+                except Exception:
+                    pass
 
     except Exception:
         pass

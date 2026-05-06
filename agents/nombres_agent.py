@@ -31,44 +31,23 @@ def _tiene_chino(texto: str) -> bool:
     return bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', str(texto)))
 
 
-_PALABRAS_INGLES: frozenset = frozenset({
-    # Tipos de producto
-    "storage", "basket", "box", "bag", "holder", "rack", "shelf", "stand",
-    "chair", "table", "desk", "lamp", "light", "led", "set", "kit", "pack",
-    "case", "cover", "handle", "hook", "hanger", "organizer", "container",
-    "bin", "tray", "bowl", "cup", "mug", "plate", "pot", "pan", "mat",
-    "pad", "cushion", "pillow", "towel", "cloth", "brush", "roller", "rope",
-    "belt", "strap", "clip", "lock", "frame", "board", "panel", "bracket",
-    "earphone", "headphone", "speaker", "charger", "cable", "adapter",
-    "watch", "clock", "fan", "heater", "cooler", "cleaner", "vacuum",
-    "ladder", "stool", "bench", "sofa", "cabinet", "drawer", "curtain",
-    "mirror", "vase", "wrench", "pliers", "screwdriver", "hammer", "drill",
-    "wheel", "tire", "pump", "valve", "filter", "tube", "pipe", "hose",
-    "bottle", "jar", "lid", "cap", "opener", "cutter", "knife", "scissors",
-    # Materiales
-    "plastic", "metal", "wood", "wooden", "steel", "iron", "aluminum",
-    "cotton", "polyester", "fabric", "leather", "rubber", "silicone", "foam",
-    # Colores en ingles
-    "black", "white", "red", "blue", "green", "yellow", "pink", "grey",
-    "gray", "brown", "purple", "orange", "gold", "silver", "beige",
-    # Adjetivos frecuentes en catalogos de importacion
-    "large", "small", "medium", "big", "mini", "portable", "foldable",
-    "folding", "adjustable", "waterproof", "electric", "wireless", "solar",
-    "outdoor", "indoor", "kitchen", "bathroom", "bedroom", "garden", "office",
-    # Unidades y descriptores de catalogo
-    "pcs", "pieces", "units", "type", "style", "model", "size", "new",
-})
+
+_MARCAS_ESPANOL: frozenset = frozenset('áéíóúüñÁÉÍÓÚÜÑ')
 
 
 def _tiene_ingles(texto: str) -> bool:
-    """Detecta ingles de catalogo de fabricante chino (vocabulario de productos)."""
+    """
+    Devuelve True si el texto tiene letras latinas pero no marcas de espanol
+    (tildes, enie). Cubre ingles y cualquier otro idioma sin marcar.
+    Claude decide si realmente necesita traduccion o ya es espanol sin acento.
+    """
     if not texto or _tiene_chino(texto):
         return False
-    palabras = set(re.findall(r'[a-zA-Z]+', texto.lower()))
-    return bool(palabras & _PALABRAS_INGLES)
+    if any(c in _MARCAS_ESPANOL for c in texto):
+        return False
+    return bool(re.search(r'[a-zA-Z]{2,}', texto))
 
 
-# ── Normalización de nombres ──────────────────────────────────────────────────
 
 def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
     """

@@ -31,6 +31,43 @@ def _tiene_chino(texto: str) -> bool:
     return bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', str(texto)))
 
 
+_PALABRAS_INGLES: frozenset = frozenset({
+    # Tipos de producto
+    "storage", "basket", "box", "bag", "holder", "rack", "shelf", "stand",
+    "chair", "table", "desk", "lamp", "light", "led", "set", "kit", "pack",
+    "case", "cover", "handle", "hook", "hanger", "organizer", "container",
+    "bin", "tray", "bowl", "cup", "mug", "plate", "pot", "pan", "mat",
+    "pad", "cushion", "pillow", "towel", "cloth", "brush", "roller", "rope",
+    "belt", "strap", "clip", "lock", "frame", "board", "panel", "bracket",
+    "earphone", "headphone", "speaker", "charger", "cable", "adapter",
+    "watch", "clock", "fan", "heater", "cooler", "cleaner", "vacuum",
+    "ladder", "stool", "bench", "sofa", "cabinet", "drawer", "curtain",
+    "mirror", "vase", "wrench", "pliers", "screwdriver", "hammer", "drill",
+    "wheel", "tire", "pump", "valve", "filter", "tube", "pipe", "hose",
+    "bottle", "jar", "lid", "cap", "opener", "cutter", "knife", "scissors",
+    # Materiales
+    "plastic", "metal", "wood", "wooden", "steel", "iron", "aluminum",
+    "cotton", "polyester", "fabric", "leather", "rubber", "silicone", "foam",
+    # Colores en ingles
+    "black", "white", "red", "blue", "green", "yellow", "pink", "grey",
+    "gray", "brown", "purple", "orange", "gold", "silver", "beige",
+    # Adjetivos frecuentes en catalogos de importacion
+    "large", "small", "medium", "big", "mini", "portable", "foldable",
+    "folding", "adjustable", "waterproof", "electric", "wireless", "solar",
+    "outdoor", "indoor", "kitchen", "bathroom", "bedroom", "garden", "office",
+    # Unidades y descriptores de catalogo
+    "pcs", "pieces", "units", "type", "style", "model", "size", "new",
+})
+
+
+def _tiene_ingles(texto: str) -> bool:
+    """Detecta ingles de catalogo de fabricante chino (vocabulario de productos)."""
+    if not texto or _tiene_chino(texto):
+        return False
+    palabras = set(re.findall(r'[a-zA-Z]+', texto.lower()))
+    return bool(palabras & _PALABRAS_INGLES)
+
+
 # ── Normalización de nombres ──────────────────────────────────────────────────
 
 def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
@@ -55,7 +92,7 @@ def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
     for real_i, prod in enumerate(productos):
         nombre     = str(prod.get("nombre")     or "").strip()
         nombre_alt = str(prod.get("nombre_alt") or "").strip()
-        if _tiene_chino(nombre) or _tiene_chino(nombre_alt):
+        if _tiene_chino(nombre) or _tiene_chino(nombre_alt) or _tiene_ingles(nombre) or _tiene_ingles(nombre_alt):
             local_idx = len(items_para_claude)
             local_a_real[local_idx] = real_i
             items_para_claude.append({
@@ -68,14 +105,15 @@ def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
         return productos
 
     lista_json = json.dumps(items_para_claude, ensure_ascii=False, indent=2)
-    prompt = f"""Tienes una lista de productos importados de China. Cada uno puede tener un nombre principal y un nombre alternativo (en inglés, chino o ambos).
+    prompt = f"""Tienes una lista de productos importados de China. Cada uno tiene un nombre principal y opcionalmente un nombre alternativo (pueden estar en chino, inglés o español).
 
 Tu tarea para cada producto:
 1. Elige el nombre MÁS ESPECÍFICO y DESCRIPTIVO entre "nombre" y "nombre_alt" (si existe).
-   Si el nombre en chino describe mejor el producto (incluye color, modelo, batería, etc.) elige el chino.
-2. Si el nombre elegido está en chino → tradúcelo al español de forma comercial y clara (máx 80 caracteres).
-3. Si el nombre elegido está en inglés → tradúcelo también al español claro.
-4. Devuelve EXACTAMENTE los mismos valores de "idx" que recibiste — no los cambies ni renumeres.
+   Prefiere el que incluya más detalles: color, material, modelo, capacidad, etc.
+2. Si el nombre elegido está en chino o inglés → tradúcelo al español comercial y claro (máx 80 caracteres).
+3. Si ya está en español → devuélvelo tal cual, sin cambios.
+4. El nombre final debe describir con precisión el producto real (no uses nombres genéricos si hay uno más específico).
+5. Devuelve EXACTAMENTE los mismos valores de "idx" que recibiste — no los cambies ni renumeres.
 
 Devuelve ÚNICAMENTE un array JSON (sin texto adicional, sin markdown):
 [

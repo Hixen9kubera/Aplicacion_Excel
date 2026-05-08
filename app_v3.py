@@ -469,15 +469,12 @@ def enriquecer_con_imagenes(file_bytes: bytes, productos: list[dict]) -> tuple[l
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _generar_sku_padre(subcategoria_cod: str) -> str:
-    """
-    Genera SKU de producto padre: SUBCAT-NNNN (sin atributo).
-
-    NO valida contra SUBCATEGORIAS — sincronizar_contadores_con_odoo ya sembró
-    el contador para cualquier sub_cod que exista en Odoo (incluidos códigos como
-    "LUZ", "MONT", etc. que Vision puede devolver y que ya tienen historial).
-    Así el número incrementa correctamente desde el último de Odoo en esta sesión.
+    """Genera SKU de producto padre: SUBCAT-NNNN (sin atributo).
+    Solo usa códigos de SUBCATEGORIAS; cualquier otro cae a VAR.
     """
     sub = subcategoria_cod.strip().upper() if subcategoria_cod else _SUBCAT_DEFAULT
+    if sub not in SUBCATEGORIAS:
+        sub = _SUBCAT_DEFAULT
     contadores = st.session_state.setdefault("sku_contadores", {})
     contadores[sub] = contadores.get(sub, 0) + 1
     sku = f"{sub}-{contadores[sub]:04d}"
@@ -705,12 +702,16 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                 sku_padre = _generar_sku_padre(sub_cod)
                 partes    = sku_padre.replace("_test", "").split("-")
                 try:
+                    # sub_real puede diferir de sub_cod si sub_cod no era válido
+                    # (ej. sub_cod="LUZ" → sub_real="VAR")
+                    sub_real  = partes[0]
                     num_nuevo = int(partes[1]) if len(partes) >= 2 else 1
                 except (ValueError, IndexError):
+                    sub_real  = sub_cod if sub_cod in SUBCATEGORIAS else _SUBCAT_DEFAULT
                     num_nuevo = 1
                 prop["padre_sku"] = sku_padre
                 if att_cod:
-                    sku_var = _sku_mismo_numero(sub_cod, num_nuevo, att_cod)
+                    sku_var = _sku_mismo_numero(sub_real, num_nuevo, att_cod)
                     if skus_odoo:
                         _val = validar_sku_vs_odoo(sku_var, skus_odoo)
                         sku_var = _val["sku_ajustado"]
@@ -719,8 +720,8 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                         # parta de ahí y no vuelva a generar el mismo número.
                         if _val["nuevo_num"] is not None:
                             num_nuevo = _val["nuevo_num"]
-                            st.session_state.setdefault("sku_contadores", {})[sub_cod] = num_nuevo
-                            sku_padre = f"{sub_cod}-{num_nuevo:04d}"
+                            st.session_state.setdefault("sku_contadores", {})[sub_real] = num_nuevo
+                            sku_padre = f"{sub_real}-{num_nuevo:04d}"
                             if st.session_state.get("modo_prueba"):
                                 sku_padre += "_test"
                             prop["padre_sku"] = sku_padre
@@ -730,7 +731,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                     prop["sku"]    = sku_padre
                     prop["accion"] = "crear_padre_solo"
                 registro[nombre_base] = {
-                    "sku_padre": sku_padre, "subcod": sub_cod, "numero": num_nuevo,
+                    "sku_padre": sku_padre, "subcod": sub_real, "numero": num_nuevo,
                     "odoo_id": None, "odoo_nombre": "",
                     "padre_idx": i,
                     "padre_phash": _phash_by_idx.get(i),

@@ -727,6 +727,21 @@ def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
 _CHUNK_CATEGORIAS = 50
 
 
+_SUBCAT_VALIDAS = (
+    "MUE,MES,SIL,CAM,EST,ORG,COM,ESCR,BAN,JAR,TV,COC,DEC,ILUM,TEX,"
+    "BEB,CUNA,PAS,CORR,ALIM,HIG,ROBB,SEG,JUG,"
+    "JUGU,MUN,PEL,VEH,CONS,JUEG,CART,ELEC,CAS,MONT,DEPO,EDU,"
+    "ROP,CALZ,ACC,TEC,CEL,HERR,OFI,MASC,"
+    "LIB,ART,DEP,VIA,VAR"
+)
+_ATTR_VALIDOS = (
+    "NEG,BLN,GRI,ROJ,AZL,VER,AMA,ROS,NAR,MOR,CAF,BEI,MUL,PLA,DOR,"
+    "XS,S,M,L,XL,UNI,MAD,MET,TEL,CUE,EST,PRE,ECO,INF,ADU"
+)
+_SUBCAT_SET = set(_SUBCAT_VALIDAS.replace(" ", "").split(","))
+_ATTR_SET   = set(_ATTR_VALIDOS.replace(" ", "").split(","))
+
+
 def _inferir_categorias_batch(productos: list[dict]) -> list[dict]:
     """
     Infiere subcategoria_cod y atributo_cod para todos los productos en batch.
@@ -748,11 +763,12 @@ def _inferir_categorias_batch(productos: list[dict]) -> list[dict]:
             for j, p in enumerate(chunk)
         ]
         prompt = (
-            "Clasifica cada producto ferretero/hogar para generar un SKU.\n"
+            "Clasifica cada producto para generar un SKU. "
             "Devuelve SOLO un JSON array en el mismo orden, sin texto adicional:\n"
-            "[{\"subcategoria_cod\": \"XXX\", \"atributo_cod\": \"YYY\"}, ...]\n"
-            "subcategoria_cod: 2-4 letras mayúsculas (tipo producto, ej: MES, SIL, CAJ, BOL, CES, TIN)\n"
-            "atributo_cod: 2-4 letras mayúsculas (color/material, ej: NGR, BLC, NAT, GEN, RJO)\n\n"
+            "[{\"subcategoria_cod\": \"XXX\", \"atributo_cod\": \"YYY\"}, ...]\n\n"
+            f"subcategoria_cod — SOLO uno de estos códigos exactos: {_SUBCAT_VALIDAS}\n"
+            f"atributo_cod     — SOLO uno de estos códigos exactos: {_ATTR_VALIDOS}\n"
+            "Si no estás seguro, usa VAR para subcategoria y EST para atributo.\n\n"
             "Productos:\n" + "\n".join(lineas)
         )
         try:
@@ -771,6 +787,12 @@ def _inferir_categorias_batch(productos: list[dict]) -> list[dict]:
             parcial = []
         while len(parcial) < len(chunk):
             parcial.append(_vacio)
+        # Forzar fallback si Haiku devuelve un código fuera de la lista permitida
+        for item in parcial:
+            if item.get("subcategoria_cod", "VAR") not in _SUBCAT_SET:
+                item["subcategoria_cod"] = "VAR"
+            if item.get("atributo_cod", "EST") not in _ATTR_SET:
+                item["atributo_cod"] = "EST"
         resultados.extend(parcial[:len(chunk)])
 
     return resultados

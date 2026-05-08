@@ -3220,6 +3220,17 @@ if st.session_state.get("clasificacion_activa"):
                     _prop["nombre_base"] = _nb_edit
                     _prop["nombre"]      = _nb_edit
 
+            # Propagar nombre_base editado de padres a sus duplicados
+            _nb_por_padre_e = {
+                p["padre_sku"]: p["nombre_base"]
+                for p in _props
+                if p["accion"] != "duplicado" and p.get("padre_sku")
+            }
+            for _p in _props:
+                if _p["accion"] == "duplicado" and _p.get("padre_sku") in _nb_por_padre_e:
+                    _p["nombre_base"] = _nb_por_padre_e[_p["padre_sku"]]
+                    _p["nombre"]      = _nb_por_padre_e[_p["padre_sku"]]
+
             renombrar_imagenes_con_sku(_productos_c)
 
             # Rellenar descripcion/categoria/atributo desde datos_vision (por si Phase 2 no corrió)

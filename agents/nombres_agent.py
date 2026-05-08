@@ -675,15 +675,18 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
     prompt = (
         "Analiza estos nombres de productos de una importación de contenedor.\n"
         "Para cada uno extrae:\n"
+        "- idx: el número exacto que aparece antes del ':' en la lista (devuélvelo sin cambios)\n"
         "- nombre_base: nombre base SIN color, talla o material específico. "
         "SIEMPRE en español — si el nombre está en inglés o chino, tradúcelo al español comercial claro.\n"
         "- atributo_tipo: \"Color\", \"Talla\", \"Material\", o null si no hay atributo distinguible. "
         "Para ropa y calzado usa \"Talla\" si el nombre incluye XS/S/M/L/XL/XXL o número de talla.\n"
         "- atributo_valor: valor concreto en español (\"Azul\", \"XL\", \"Madera\") o null\n\n"
-        "IMPORTANTE: Si dos o más productos son el mismo tipo base con distinto color/talla/material "
+        "IMPORTANTE:\n"
+        "- Devuelve EXACTAMENTE un elemento por producto recibido, en el mismo orden.\n"
+        "- Si dos o más productos son el mismo tipo base con distinto color/talla/material "
         "(ej: \"Camiseta Talla M\" y \"Camiseta Talla L\"), deben tener el MISMO nombre_base (\"Camiseta\").\n\n"
-        "Responde SOLO con JSON array (mismo orden, sin texto extra):\n"
-        "[{\"nombre_base\":\"...\",\"atributo_tipo\":\"...\",\"atributo_valor\":\"...\"}, ...]\n\n"
+        "Responde SOLO con JSON array (sin texto extra):\n"
+        "[{\"idx\":0,\"nombre_base\":\"...\",\"atributo_tipo\":\"...\",\"atributo_valor\":\"...\"}, ...]\n\n"
         "Productos:\n" + "\n".join(lineas)
     )
     llm  = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=8000)
@@ -696,7 +699,19 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
     end   = content.rfind("]") + 1
     if start >= 0 and end > start:
         content = content[start:end]
-    return json.loads(content)
+    raw = json.loads(content)
+    # Reordenar por idx para evitar desalineación si Claude cambia el orden
+    _vacio_chunk = {"nombre_base": None, "atributo_tipo": None, "atributo_valor": None}
+    ordered: list[dict] = [_vacio_chunk.copy() for _ in lineas]
+    for item in raw:
+        _i = item.get("idx")
+        if _i is not None and 0 <= _i < len(ordered):
+            ordered[_i] = {
+                "nombre_base":   item.get("nombre_base"),
+                "atributo_tipo": item.get("atributo_tipo"),
+                "atributo_valor": item.get("atributo_valor"),
+            }
+    return ordered
 
 
 def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:

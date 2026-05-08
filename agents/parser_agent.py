@@ -109,7 +109,10 @@ Regla clave para columnas ambiguas (header solo dice "CBM" o "M³" sin especific
 Si hay más de una columna CBM, mapéalas todas. Nunca mapees la misma columna en dos campos distintos.
 
 IMPORTANTE para nombre_producto y nombre_producto_alt:
-- Si hay DOS columnas de nombre (ej: una en inglés y otra en chino), mapea la principal en nombre_producto y la alternativa en nombre_producto_alt.
+- Si hay DOS columnas de nombre (una en inglés y otra en chino):
+  * La columna en CHINO va en nombre_producto (tiene prioridad — es más descriptiva para productos importados).
+  * La columna en INGLÉS va en nombre_producto_alt.
+- Si solo hay columna en inglés o en español, esa va en nombre_producto y nombre_producto_alt queda sin encontrar.
 - Si solo hay una columna de nombre, deja nombre_producto_alt con confianza "no_encontrado".
 
 DATOS (filas del Excel con su número de fila real):

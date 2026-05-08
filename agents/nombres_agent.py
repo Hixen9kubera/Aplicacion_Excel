@@ -57,10 +57,13 @@ Tu tarea para cada producto:
 1. PRIORIDAD de fuente:
    a) Si "nombre" está en chino → úsalo como base (es el más descriptivo para estos productos).
    b) Si "nombre" NO está en chino pero "nombre_alt" sí → usa "nombre_alt" como base.
-   c) Si ninguno está en chino → usa el que tenga más detalles específicos (color, talla, material, modelo, capacidad, etc.).
-2. Traduce el nombre elegido al español comercial claro (máx 80 caracteres). SIEMPRE en español — nunca dejes caracteres chinos ni inglés sin traducir.
-3. Si el nombre incluye talla o tamaño (XS/S/M/L/XL/XXL, números de talla, etc.) consérvala en el nombre final.
-4. El nombre final debe describir el producto con precisión. No uses nombres genéricos si hay uno más específico.
+   c) Si ninguno está en chino → usa el que tenga más detalles específicos.
+2. Traduce al español comercial claro (máx 80 caracteres). SIEMPRE en español — nunca dejes chino ni inglés sin traducir.
+3. CONSERVA SIEMPRE en el nombre final todos los atributos diferenciadores presentes:
+   - Talla (XS/S/M/L/XL/XXL/XXXL, números de talla como 36/38/40, 'unitalla') — MUY IMPORTANTE
+   - Color si aparece en el nombre original
+   - Modelo o código si aporta información útil
+4. El nombre final debe ser preciso. No uses nombres genéricos si hay uno más específico.
 5. Devuelve EXACTAMENTE los mismos valores de "idx" que recibiste — no los cambies ni renumeres.
 
 Devuelve ÚNICAMENTE un array JSON (sin texto adicional, sin markdown):
@@ -687,17 +690,23 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
     """Llama a Haiku con un subconjunto de líneas y devuelve la lista de clasificaciones."""
     prompt = (
         "Analiza estos nombres de productos de una importación de contenedor.\n"
-        "Para cada uno extrae:\n"
-        "- idx: el número exacto que aparece antes del ':' en la lista (devuélvelo sin cambios)\n"
-        "- nombre_base: nombre base SIN color, talla o material específico. "
-        "SIEMPRE en español — si el nombre está en inglés o chino, tradúcelo al español comercial claro.\n"
-        "- atributo_tipo: \"Color\", \"Talla\", \"Material\", o null si no hay atributo distinguible. "
-        "Para ropa y calzado usa \"Talla\" si el nombre incluye XS/S/M/L/XL/XXL o número de talla.\n"
-        "- atributo_valor: valor concreto en español (\"Azul\", \"XL\", \"Madera\") o null\n\n"
-        "IMPORTANTE:\n"
-        "- Devuelve EXACTAMENTE un elemento por producto recibido, en el mismo orden.\n"
-        "- Si dos o más productos son el mismo tipo base con distinto color/talla/material "
-        "(ej: \"Camiseta Talla M\" y \"Camiseta Talla L\"), deben tener el MISMO nombre_base (\"Camiseta\").\n\n"
+        "Para cada uno extrae:\n\n"
+        "- idx: el número exacto que aparece antes del ':' en la lista (devuélvelo sin cambios)\n\n"
+        "- nombre_base: nombre genérico del producto SIN talla, color, modelo ni material. "
+        "SIEMPRE en español. Dos productos del mismo tipo deben compartir el MISMO nombre_base.\n"
+        "  Ej: 'Sudadera Azul Talla M' → 'Sudadera'\n"
+        "  Ej: 'Bata de seda M' y 'Bata de seda XL' → 'Bata de seda'\n\n"
+        "- atributo_tipo: elige UNO según esta prioridad estricta:\n"
+        "  1. 'Talla' — si el nombre incluye XS/S/M/L/XL/XXL/XXXL, número de talla (36/38/40…) o 'unitalla'. "
+        "SIEMPRE prioriza talla sobre color y material para ropa, calzado y accesorios de vestir.\n"
+        "  2. 'Color' — si hay un color explícito y NO hay talla\n"
+        "  3. 'Material' — si hay material explícito y NO hay talla ni color\n"
+        "  4. null — si no hay ningún atributo diferenciador\n\n"
+        "- atributo_valor: el valor exacto del atributo elegido:\n"
+        "  • Para Talla: devuelve SOLO el código de talla (M, L, XL, XXL, 38, Unitalla…), nunca 'Talla M'\n"
+        "  • Para Color: nombre del color en español (Azul, Negro, Multicolor…)\n"
+        "  • Para Material: nombre del material en español (Madera, Metal…)\n"
+        "  • null si atributo_tipo es null\n\n"
         "Responde SOLO con JSON array (sin texto extra):\n"
         "[{\"idx\":0,\"nombre_base\":\"...\",\"atributo_tipo\":\"...\",\"atributo_valor\":\"...\"}, ...]\n\n"
         "Productos:\n" + "\n".join(lineas)
@@ -773,7 +782,7 @@ _SUBCAT_VALIDAS = (
 )
 _ATTR_VALIDOS = (
     "NEG,BLN,GRI,ROJ,AZL,VER,AMA,ROS,NAR,MOR,CAF,BEI,MUL,PLA,DOR,"
-    "XS,S,M,L,XL,UNI,MAD,MET,TEL,CUE,EST,PRE,ECO,INF,ADU"
+    "XS,S,M,L,XL,XXL,UNI,MAD,MET,TEL,CUE,EST,PRE,ECO,INF,ADU"
 )
 _SUBCAT_SET = set(_SUBCAT_VALIDAS.replace(" ", "").split(","))
 _ATTR_SET   = set(_ATTR_VALIDOS.replace(" ", "").split(","))

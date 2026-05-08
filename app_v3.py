@@ -133,7 +133,7 @@ ATRIBUTOS = {
     "MUL": "Multicolor","PLA": "Plateado","DOR": "Dorado",
     # TALLAS
     "XS": "Extra Small","S": "Small",  "M": "Medium",    "L": "Large",
-    "XL": "Extra Large","UNI": "Talla Única",
+    "XL": "Extra Large","XXL": "Extra Extra Large","UNI": "Talla Única",
     # MATERIALES
     "MAD": "Madera",  "MET": "Metal",   "TEL": "Tela",    "CUE": "Cuero",
     # OTROS
@@ -487,11 +487,16 @@ def _atributo_cod_desde_valor(atributo_valor: str | None) -> str | None:
     """Mapea atributo_valor al código de SKU del dict ATRIBUTOS. Fallback: 3 letras."""
     if not atributo_valor:
         return None
-    val_lower = atributo_valor.lower().strip()
+    val = atributo_valor.strip()
+    val_lower = val.lower()
+    # Quitar prefijo "talla " si Claude lo incluyó (ej: "Talla M" → "M")
+    if val_lower.startswith("talla "):
+        val = val[6:].strip()
+        val_lower = val.lower()
     for cod, desc in ATRIBUTOS.items():
         if desc.lower() == val_lower or cod.lower() == val_lower:
             return cod
-    return atributo_valor[:3].upper()
+    return val[:3].upper()
 
 
 def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], modo_fase1: bool = False) -> list[dict]:
@@ -1346,7 +1351,7 @@ def _parsear_desc_interna(texto: str) -> dict:
 
 def _cod_atrib_a_tipo(cod: str) -> str:
     _COLORES    = {"NEG","BLN","GRI","ROJ","AZL","VER","AMA","ROS","NAR","MOR","CAF","BEI","MUL","PLA","DOR"}
-    _TALLAS     = {"XS","S","M","L","XL","UNI"}
+    _TALLAS     = {"XS","S","M","L","XL","XXL","UNI"}
     _MATERIALES = {"MAD","MET","TEL","CUE"}
     if cod in _COLORES:
         return "Color"

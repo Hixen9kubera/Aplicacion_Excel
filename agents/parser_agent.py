@@ -661,7 +661,13 @@ def renombrar_imagenes_con_sku(productos: list[dict]) -> tuple[int, list[str]]:
         for archivo in IMAGENES_TEMP_PATH.iterdir():
             if archivo.stem == stem_buscado:
                 nueva_ruta = archivo.with_name(f"{sku}{archivo.suffix}")
+                if nueva_ruta == archivo:
+                    # Ya tiene el nombre correcto — no borrar
+                    prod["imagen_temp_stem"] = sku
+                    encontrado = True
+                    break
                 if nueva_ruta.exists():
+                    # Ya existe un archivo con el nombre destino — descartar el actual
                     try:
                         archivo.unlink()
                     except Exception:

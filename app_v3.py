@@ -618,11 +618,16 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
             _ph_padre  = registro[nombre_base].get("padre_phash")
             if _ph_actual is not None and _ph_padre is not None:
                 if _ph_actual - _ph_padre > _UMBRAL_SPLIT:
-                    # Imágenes demasiado distintas para ser el mismo producto
-                    _sfx = 1
-                    while f"{nombre_base}#{_sfx}" in registro:
-                        _sfx += 1
-                    nombre_base = f"{nombre_base}#{_sfx}"
+                    # Imagen distinta al padre original — buscar si ya existe un split similar
+                    _sfx_check = 1
+                    _matched_split = None
+                    while f"{nombre_base}#{_sfx_check}" in registro:
+                        _ph_split = registro[f"{nombre_base}#{_sfx_check}"].get("padre_phash")
+                        if _ph_split is not None and _ph_actual - _ph_split <= _UMBRAL_SPLIT:
+                            _matched_split = f"{nombre_base}#{_sfx_check}"
+                            break
+                        _sfx_check += 1
+                    nombre_base = _matched_split if _matched_split else f"{nombre_base}#{_sfx_check}"
                     prop["nombre_base"] = nombre_base
 
         if nombre_base in registro:

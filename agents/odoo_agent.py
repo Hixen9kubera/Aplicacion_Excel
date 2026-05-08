@@ -691,6 +691,84 @@ def _subir_productos_a_odoo(
     return subidas, errores
 
 
+def cargar_productos_por_contenedor(
+    url: str, db: str, username: str, password: str, contenedor: str,
+) -> tuple[list[dict], str | None]:
+    """
+    Fetches all product.template + variants from 'Productos Agente' that have
+    the given container number in their container_numbers field.
+
+    Each returned dict is a template record enriched with a 'variants' key
+    (list of product.product dicts) so the caller can distinguish single-product
+    templates from multi-variant ones.
+    """
+    try:
+        common = xmlrpc.client.ServerProxy(
+            f"{url}/xmlrpc/2/common", allow_none=True, encoding="utf-8"
+        )
+        uid = common.authenticate(db, username, password, {})
+        if not uid:
+            return [], "Credenciales inválidas"
+        models = xmlrpc.client.ServerProxy(
+            f"{url}/xmlrpc/2/object", allow_none=True, encoding="utf-8"
+        )
+
+        cat_ids = models.execute_kw(
+            db, uid, password,
+            "product.category", "search",
+            [[["name", "=", "Productos Agente"]]],
+        )
+        if not cat_ids:
+            return [], "No se encontró la categoría 'Productos Agente' en Odoo"
+
+        tmpls = models.execute_kw(
+            db, uid, password,
+            "product.template", "search_read",
+            [[
+                ["default_code", "!=", False],
+                ["categ_id", "in", cat_ids],
+                ["container_numbers", "ilike", contenedor],
+            ]],
+            {
+                "fields": [
+                    "id", "name", "default_code",
+                    "description_sale", "description",
+                    "list_price", "volume",
+                    "product_variant_ids",
+                ],
+                "limit": 0,
+            },
+        )
+
+        if not tmpls:
+            return [], f"No se encontraron productos para el contenedor '{contenedor}'"
+
+        # Fetch variant SKUs in bulk
+        all_var_ids: list[int] = []
+        for t in tmpls:
+            all_var_ids.extend(t.get("product_variant_ids") or [])
+
+        vars_by_tmpl: dict[int, list[dict]] = {}
+        if all_var_ids:
+            vars_ = models.execute_kw(
+                db, uid, password,
+                "product.product", "search_read",
+                [[["id", "in", all_var_ids]]],
+                {"fields": ["id", "default_code", "product_tmpl_id"], "limit": 0},
+            )
+            for v in vars_:
+                tid = v["product_tmpl_id"][0] if v.get("product_tmpl_id") else None
+                if tid is not None:
+                    vars_by_tmpl.setdefault(tid, []).append(v)
+
+        for t in tmpls:
+            t["variants"] = vars_by_tmpl.get(t["id"], [])
+
+        return tmpls, None
+    except Exception as e:
+        return [], str(e)
+
+
 def _reintentar_skus_fallidos(
     errores_subida: list[str],
     productos: list[dict],

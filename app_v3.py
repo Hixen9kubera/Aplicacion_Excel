@@ -78,6 +78,7 @@ from agents.odoo_agent import (
     cargar_skus_odoo, cargar_todos_productos_odoo, cargar_detalle_productos_odoo,
     aplicar_resoluciones_conflictos, validar_sku_vs_odoo,
     _subir_productos_a_odoo, _reintentar_skus_fallidos,
+    cargar_productos_por_contenedor,
 )
 
 # ── Cargar .env ────────────────────────────────────────────────────────────────
@@ -1239,6 +1240,232 @@ def llamar_agente(user_input: str, system: str, lc_messages: list) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# EXPORTAR DESDE ODOO — helpers y orquestador
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _parsear_desc_sale(texto: str) -> dict:
+    """Parsea description_sale de Odoo a campos individuales del producto."""
+    r: dict = {}
+    if not texto:
+        return r
+    for line in texto.splitlines():
+        line = line.strip()
+        if line.startswith("Material:"):
+            r["material"] = line[9:].strip()
+        elif line.startswith("Uso:"):
+            r["uso"] = line[4:].strip()
+        elif line.startswith("Precio USD:"):
+            try:
+                r["precio_usd"] = float(line[11:].strip().lstrip("$"))
+            except Exception:
+                pass
+        elif line.startswith("Piezas por caja:"):
+            try:
+                r["piezas_x_caja"] = int(float(line[16:].strip()))
+            except Exception:
+                pass
+        elif line.startswith("Dimensiones:"):
+            dims = re.sub(r'\s*cm\s*$', '', line[12:].strip())
+            parts = re.split(r'[×xX]', dims)
+            if len(parts) >= 3:
+                try:
+                    r["largo_cm"] = float(parts[0].strip())
+                    r["ancho_cm"] = float(parts[1].strip())
+                    r["alto_cm"]  = float(parts[2].strip())
+                except Exception:
+                    pass
+    return r
+
+
+def _parsear_desc_interna(texto: str) -> dict:
+    """Parsea la descripción interna (notas) de Odoo a campos de producto."""
+    r: dict = {}
+    if not texto:
+        return r
+    for line in texto.splitlines():
+        line = line.strip()
+        if line.startswith("Nombre alternativo:"):
+            r["nombre_alt"] = line[19:].strip()
+        elif line.lower().startswith("id guía"):
+            r["id_guia"] = line.split(":", 1)[-1].strip()
+        elif line.startswith("Cajas master:"):
+            try:
+                r["cajas_master"] = int(float(line[13:].strip()))
+            except Exception:
+                pass
+        elif line.startswith("Piezas totales"):
+            try:
+                r["piezas_total"] = int(float(line.split(":", 1)[-1].strip()))
+            except Exception:
+                pass
+        elif line.startswith("CBM por pieza:"):
+            try:
+                r["cbm_por_pieza"] = float(line[14:].strip().split()[0])
+            except Exception:
+                pass
+        elif line.startswith("CBM master carton:"):
+            try:
+                r["cbm_master_carton"] = float(line[18:].strip())
+            except Exception:
+                pass
+        elif line.startswith("CBM total SKU:"):
+            try:
+                r["cbm_total_sku"] = float(line[14:].strip())
+            except Exception:
+                pass
+    return r
+
+
+def _cod_atrib_a_tipo(cod: str) -> str:
+    _COLORES    = {"NEG","BLN","GRI","ROJ","AZL","VER","AMA","ROS","NAR","MOR","CAF","BEI","MUL","PLA","DOR"}
+    _TALLAS     = {"XS","S","M","L","XL","UNI"}
+    _MATERIALES = {"MAD","MET","TEL","CUE"}
+    if cod in _COLORES:
+        return "Color"
+    if cod in _TALLAS:
+        return "Talla"
+    if cod in _MATERIALES:
+        return "Material"
+    return "Tipo"
+
+
+def generar_excels_desde_contenedor(contenedor: str) -> dict:
+    """
+    Fetches products from Odoo by container number, reconstructs product data,
+    and generates all four Excel files.
+
+    Returns dict with keys: reporte_bytes, ferraforme_bytes, master_bytes,
+    purchase_bytes, n_prods, error.
+    """
+    odoo_url  = os.environ.get("ODOO_URL", "")
+    odoo_db   = os.environ.get("ODOO_DB", "")
+    odoo_user = os.environ.get("ODOO_USER", "")
+    odoo_pass = os.environ.get("ODOO_PASSWORD", "")
+    if not all([odoo_url, odoo_db, odoo_user, odoo_pass]):
+        return {"error": "Faltan credenciales ODOO en el .env"}
+
+    tmpls, err = cargar_productos_por_contenedor(odoo_url, odoo_db, odoo_user, odoo_pass, contenedor)
+    if err:
+        return {"error": err}
+
+    tc = st.session_state.get("tipo_cambio", 19.0)
+    cc = st.session_state.get("costo_contenedor", 525000.0)
+
+    productos:  list[dict] = []
+    propuestas: list[dict] = []
+
+    for tmpl in tmpls:
+        padre_sku  = (tmpl.get("default_code") or "").replace("_test", "")
+        nombre_raw = tmpl.get("name") or ""
+        nombre     = nombre_raw[:-5] if nombre_raw.endswith("_test") else nombre_raw
+
+        ds = _parsear_desc_sale(tmpl.get("description_sale") or "")
+        dn = _parsear_desc_interna(tmpl.get("description") or "")
+
+        cbm_pz = dn.get("cbm_por_pieza") or _safe_float(tmpl.get("volume"))
+
+        m_padre = re.match(r'^([A-Z]{2,4})-(\d{4})-([A-Z]{2,5})', padre_sku)
+        subcat_padre = m_padre.group(1) if m_padre else "VAR"
+
+        prod_base: dict = {
+            "nombre":            nombre,
+            "precio_usd":        ds.get("precio_usd", 0),
+            "material":          ds.get("material", ""),
+            "uso":               ds.get("uso", ""),
+            "piezas_x_caja":     ds.get("piezas_x_caja"),
+            "largo_cm":          ds.get("largo_cm"),
+            "ancho_cm":          ds.get("ancho_cm"),
+            "alto_cm":           ds.get("alto_cm"),
+            "piezas_total":      dn.get("piezas_total"),
+            "cajas_master":      dn.get("cajas_master"),
+            "cbm_por_pieza":     cbm_pz or None,
+            "cbm_master_carton": dn.get("cbm_master_carton"),
+            "cbm_total_sku":     dn.get("cbm_total_sku"),
+            "tipo_producto":     "Producto almacenable",
+            "descripcion":       tmpl.get("description_sale") or "",
+        }
+
+        # Variants with a different SKU from the template = real color/size variants
+        variants_con_sku = [
+            v for v in (tmpl.get("variants") or [])
+            if v.get("default_code")
+            and v["default_code"].replace("_test", "") != padre_sku
+        ]
+
+        if not variants_con_sku:
+            m = re.match(r'^([A-Z]{2,4})-(\d{4})-([A-Z]{2,5})', padre_sku)
+            atrib_cod = m.group(3) if m else "EST"
+            fila = len(propuestas)
+            prod = {
+                **prod_base,
+                "sku":             padre_sku,
+                "padre_sku":       padre_sku,
+                "categoria":       SUBCATEGORIAS.get(subcat_padre, "Varios"),
+                "atributo":        ATRIBUTOS.get(atrib_cod, "Estándar"),
+                "fila_excel_0idx": fila,
+            }
+            productos.append(prod)
+            propuestas.append({
+                "nombre":            nombre,
+                "nombre_base":       nombre,
+                "sku":               padre_sku,
+                "padre_sku":         padre_sku,
+                "atributo_tipo":     _cod_atrib_a_tipo(atrib_cod),
+                "atributo_valor":    ATRIBUTOS.get(atrib_cod, "Estándar"),
+                "accion":            "nuevo_padre",
+                "accion_display":    "Padre nuevo",
+                "padre_odoo_nombre": nombre,
+                "padre_fuente":      "odoo",
+                "requiere_revision": False,
+                "nota_revision":     "",
+                "producto":          prod,
+            })
+        else:
+            for var in variants_con_sku:
+                var_sku = (var.get("default_code") or "").replace("_test", "")
+                m = re.match(r'^([A-Z]{2,4})-(\d{4})-([A-Z]{2,5})', var_sku)
+                atrib_cod = m.group(3) if m else "EST"
+                fila = len(propuestas)
+                prod = {
+                    **prod_base,
+                    "sku":             var_sku,
+                    "padre_sku":       padre_sku,
+                    "categoria":       SUBCATEGORIAS.get(subcat_padre, "Varios"),
+                    "atributo":        ATRIBUTOS.get(atrib_cod, "Estándar"),
+                    "fila_excel_0idx": fila,
+                }
+                productos.append(prod)
+                propuestas.append({
+                    "nombre":            nombre,
+                    "nombre_base":       nombre,
+                    "sku":               var_sku,
+                    "padre_sku":         padre_sku,
+                    "atributo_tipo":     _cod_atrib_a_tipo(atrib_cod),
+                    "atributo_valor":    ATRIBUTOS.get(atrib_cod, "Estándar"),
+                    "accion":            "nueva_variante",
+                    "accion_display":    "Variante nueva",
+                    "padre_odoo_nombre": nombre,
+                    "padre_fuente":      "odoo",
+                    "requiere_revision": False,
+                    "nota_revision":     "",
+                    "producto":          prod,
+                })
+
+    if not productos:
+        return {"error": "No se pudieron reconstruir productos desde Odoo"}
+
+    nombre_packing = f"{contenedor}_odoo"
+    return {
+        "reporte_bytes":    generar_reporte_clasificacion(propuestas, nombre_packing),
+        "ferraforme_bytes": generar_excel(productos, tc, contenedor),
+        "master_bytes":     generar_excel_master(productos, tc, cc, nombre_packing),
+        "purchase_bytes":   generar_excel_purchase(productos, tc, cc),
+        "n_prods":          len(productos),
+        "error":            None,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # STREAMLIT UI
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1543,6 +1770,71 @@ with st.sidebar:
             st.session_state.odoo_conectado = _odoo_c
             st.session_state.pop("filename", None)
             st.rerun()
+
+    # ── Exportar desde Odoo ──────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📤 Exportar desde Odoo")
+    st.caption("Genera los Excels desde un contenedor ya cargado en Odoo, sin necesidad de re-subir el packing list.")
+
+    _exp_cont = st.text_input(
+        "Número de contenedor",
+        placeholder="Ej: EITU9122770",
+        key="exportar_od_contenedor",
+    )
+    if st.button(
+        "🔍 Generar Excels desde Odoo",
+        use_container_width=True,
+        key="exportar_od_btn",
+        disabled=not bool(_exp_cont),
+    ):
+        with st.spinner(f"Cargando productos de {_exp_cont} desde Odoo..."):
+            _exp_res = generar_excels_desde_contenedor(_exp_cont.strip())
+        if _exp_res.get("error"):
+            st.error(f"Error: {_exp_res['error']}")
+        else:
+            st.session_state["exportar_od_resultado"]   = _exp_res
+            st.session_state["exportar_od_contenedor_ok"] = _exp_cont.strip()
+            st.rerun()
+
+    if st.session_state.get("exportar_od_resultado"):
+        _exp_r  = st.session_state["exportar_od_resultado"]
+        _exp_ec = st.session_state.get("exportar_od_contenedor_ok", "")
+        st.success(f"✅ {_exp_r.get('n_prods', 0)} productos recuperados de **{_exp_ec}**")
+        _exp_c1, _exp_c2 = st.columns(2)
+        with _exp_c1:
+            st.download_button(
+                "⬇️ Reporte Bodega",
+                data=_exp_r["reporte_bytes"],
+                file_name=f"{_exp_ec}_reporte_bodega.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="exp_od_dl_bodega",
+            )
+            st.download_button(
+                "⬇️ Master Costos",
+                data=_exp_r["master_bytes"],
+                file_name=f"{_exp_ec}_master_costos.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="exp_od_dl_master",
+            )
+        with _exp_c2:
+            st.download_button(
+                "⬇️ FERRAFORME",
+                data=_exp_r["ferraforme_bytes"],
+                file_name=f"{_exp_ec}_FERRAFORME.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="exp_od_dl_ferraforme",
+            )
+            st.download_button(
+                "⬇️ Purchase Order",
+                data=_exp_r["purchase_bytes"],
+                file_name=f"{_exp_ec}_purchase.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="exp_od_dl_purchase",
+            )
 
     # ── Historial de duplicados/variantes ─────────────────────────────────────
     _hist_dup = st.session_state.get("historial_duplicados", [])

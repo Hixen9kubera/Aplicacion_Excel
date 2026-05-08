@@ -1718,6 +1718,89 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Error al eliminar: {e}")
 
+    # ── Eliminar productos de un contenedor ──────────────────────────────────
+    st.divider()
+    st.caption("🗑️ Eliminar productos de contenedor")
+    _del_cont = st.text_input(
+        "Contenedor a eliminar",
+        placeholder="Ej: EITU9122770",
+        key="eliminar_cont_input",
+    )
+    _del_ok = st.checkbox("Confirmo la eliminación", key="eliminar_cont_confirm")
+    if st.button(
+        "🗑️ Eliminar productos de Odoo",
+        use_container_width=True,
+        key="eliminar_cont_btn",
+        disabled=not (bool(_del_cont) and _del_ok),
+    ):
+        odoo_url  = os.environ.get("ODOO_URL", "")
+        odoo_db   = os.environ.get("ODOO_DB", "")
+        odoo_user = os.environ.get("ODOO_USER", "")
+        odoo_pass = os.environ.get("ODOO_PASSWORD", "")
+        if not all([odoo_url, odoo_db, odoo_user, odoo_pass]):
+            st.warning("Faltan credenciales ODOO en el .env")
+        else:
+            try:
+                _del_common = xmlrpc.client.ServerProxy(
+                    f"{odoo_url}/xmlrpc/2/common", allow_none=True, encoding="utf-8")
+                _del_uid = _del_common.authenticate(odoo_db, odoo_user, odoo_pass, {})
+                _del_mdl = xmlrpc.client.ServerProxy(
+                    f"{odoo_url}/xmlrpc/2/object", allow_none=True, encoding="utf-8")
+
+                _del_cats = _del_mdl.execute_kw(odoo_db, _del_uid, odoo_pass,
+                    "product.category", "search", [[["name", "=", "Productos Agente"]]])
+                if not _del_cats:
+                    st.warning("No se encontró la categoría 'Productos Agente' en Odoo.")
+                else:
+                    _del_ids = _del_mdl.execute_kw(odoo_db, _del_uid, odoo_pass,
+                        "product.template", "search",
+                        [[["categ_id", "in", _del_cats],
+                          ["container_numbers", "ilike", _del_cont.strip()]]])
+                    if not _del_ids:
+                        st.info(f"No se encontraron productos del contenedor '{_del_cont}' en Productos Agente.")
+                    else:
+                        with st.spinner(f"Eliminando {len(_del_ids)} productos..."):
+                            _del_borrados = _del_archivados = 0
+                            _del_errs = []
+                            for _pid in _del_ids:
+                                # 1. Intentar eliminar registros product.measurement que bloquean el FK
+                                try:
+                                    _meas_ids = _del_mdl.execute_kw(odoo_db, _del_uid, odoo_pass,
+                                        "product.measurement", "search",
+                                        [[["product_tmpl_id", "=", _pid]]])
+                                    if _meas_ids:
+                                        _del_mdl.execute_kw(odoo_db, _del_uid, odoo_pass,
+                                            "product.measurement", "unlink", [_meas_ids])
+                                except Exception:
+                                    pass  # sin permisos en measurement — se intentará igual el unlink
+
+                                # 2. Intentar borrado completo
+                                try:
+                                    _del_mdl.execute_kw(odoo_db, _del_uid, odoo_pass,
+                                        "product.template", "unlink", [[_pid]])
+                                    _del_borrados += 1
+                                except Exception:
+                                    # 3. Fallback: archivar si el FK sigue bloqueando
+                                    try:
+                                        _del_mdl.execute_kw(odoo_db, _del_uid, odoo_pass,
+                                            "product.template", "write",
+                                            [[_pid], {"active": False}])
+                                        _del_archivados += 1
+                                    except Exception as _e2:
+                                        _del_errs.append(str(_e2))
+
+                        _del_partes = []
+                        if _del_borrados:
+                            _del_partes.append(f"**{_del_borrados} eliminado(s)**")
+                        if _del_archivados:
+                            _del_partes.append(f"{_del_archivados} archivado(s) (FK pendiente)")
+                        if _del_partes:
+                            st.success(f"✅ {', '.join(_del_partes)} del contenedor {_del_cont}.")
+                        if _del_errs:
+                            st.warning(f"⚠️ {len(_del_errs)} no pudieron procesarse: {_del_errs[0]}")
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+
     # ── Generar Master Costos rápido (sin pasar por todo el flujo) ───────────
     st.divider()
     st.caption("🧪 Prueba rápida de costos")

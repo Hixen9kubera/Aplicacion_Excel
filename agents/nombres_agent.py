@@ -673,7 +673,8 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
     prompt = (
         "Analiza estos nombres de productos de una importación de contenedor.\n"
         "Para cada uno extrae:\n"
-        "- nombre_base: nombre base SIN color, talla o material específico\n"
+        "- nombre_base: nombre base SIN color, talla o material específico. "
+        "SIEMPRE en español — si el nombre está en inglés o chino, tradúcelo al español comercial claro.\n"
         "- atributo_tipo: \"Color\", \"Talla\", \"Material\", o null si no hay atributo distinguible\n"
         "- atributo_valor: valor concreto (\"Azul\", \"XL\", \"Madera\") o null\n\n"
         "IMPORTANTE: Si dos o más productos son el mismo tipo base con distinto color/talla/material "

@@ -49,10 +49,57 @@ def _tiene_ingles(texto: str) -> bool:
 
 
 
+_CHUNK_NORMALIZAR = 40  # ~40 productos por llamada para no saturar los tokens de salida
+
+_PROMPT_NORMALIZAR = """Tienes una lista de productos importados de China. Cada uno tiene un nombre principal y opcionalmente un nombre alternativo (pueden estar en chino, inglés o español).
+
+Tu tarea para cada producto:
+1. PRIORIDAD de fuente:
+   a) Si "nombre" está en chino → úsalo como base (es el más descriptivo para estos productos).
+   b) Si "nombre" NO está en chino pero "nombre_alt" sí → usa "nombre_alt" como base.
+   c) Si ninguno está en chino → usa el que tenga más detalles específicos (color, talla, material, modelo, capacidad, etc.).
+2. Traduce el nombre elegido al español comercial claro (máx 80 caracteres). SIEMPRE en español — nunca dejes caracteres chinos ni inglés sin traducir.
+3. Si el nombre incluye talla o tamaño (XS/S/M/L/XL/XXL, números de talla, etc.) consérvala en el nombre final.
+4. El nombre final debe describir el producto con precisión. No uses nombres genéricos si hay uno más específico.
+5. Devuelve EXACTAMENTE los mismos valores de "idx" que recibiste — no los cambies ni renumeres.
+
+Devuelve ÚNICAMENTE un array JSON (sin texto adicional, sin markdown):
+[
+  {{"idx": <número igual al recibido>, "nombre_final": "<nombre en español>"}},
+  ...
+]
+
+Productos:
+{lista_json}"""
+
+
+def _normalizar_chunk(items: list[dict], local_a_real: dict[int, int], productos: list[dict]) -> None:
+    """Traduce un chunk de items y actualiza productos in-place."""
+    lista_json = json.dumps(items, ensure_ascii=False, indent=2)
+    prompt = _PROMPT_NORMALIZAR.format(lista_json=lista_json)
+    try:
+        _max_tok = min(150 * len(items) + 300, 8000)
+        llm   = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=_max_tok)
+        resp  = llm.invoke([HumanMessage(content=prompt)])
+        texto = resp.content.strip()
+        if texto.startswith("```"):
+            partes = texto.split("```")
+            texto  = partes[1].lstrip("json").strip() if len(partes) > 1 else texto
+        resultados = json.loads(texto)
+        for r in resultados:
+            local_idx    = r.get("idx")
+            nombre_final = str(r.get("nombre_final") or "").strip()
+            if local_idx is not None and nombre_final and local_idx in local_a_real:
+                productos[local_a_real[local_idx]]["nombre"] = nombre_final
+    except Exception:
+        pass
+
+
 def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
     """
     Para cada producto, elige el nombre más descriptivo entre nombre y nombre_alt
-    y lo traduce al español si está en chino. Una sola llamada batch a Claude.
+    y lo traduce al español si está en chino o inglés. Chunkeado en lotes de
+    _CHUNK_NORMALIZAR para no saturar el límite de tokens de salida.
     """
     for prod in productos:
         if "nombre_chino_orig" not in prod:
@@ -65,6 +112,7 @@ def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
             else:
                 prod["nombre_chino_orig"] = _n_raw
 
+    # Recolectar los que necesitan traducción
     local_a_real: dict[int, int] = {}
     items_para_claude: list[dict] = []
 
@@ -83,45 +131,10 @@ def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
     if not items_para_claude:
         return productos
 
-    lista_json = json.dumps(items_para_claude, ensure_ascii=False, indent=2)
-    prompt = f"""Tienes una lista de productos importados de China. Cada uno tiene un nombre principal y opcionalmente un nombre alternativo (pueden estar en chino, inglés o español).
-
-Tu tarea para cada producto:
-1. PRIORIDAD de fuente:
-   a) Si "nombre" está en chino → úsalo como base (es el más descriptivo para estos productos).
-   b) Si "nombre" NO está en chino pero "nombre_alt" sí → usa "nombre_alt" como base.
-   c) Si ninguno está en chino → usa el que tenga más detalles específicos (color, talla, material, modelo, capacidad, etc.).
-2. Traduce el nombre elegido al español comercial claro (máx 80 caracteres). Siempre en español.
-3. Si el nombre incluye talla o tamaño (XS/S/M/L/XL/XXL, números de talla, etc.) consérvala en el nombre final — es importante para clasificar ropa y calzado correctamente.
-4. El nombre final debe describir el producto con precisión. No uses nombres genéricos si hay uno más específico.
-5. Devuelve EXACTAMENTE los mismos valores de "idx" que recibiste — no los cambies ni renumeres.
-
-Devuelve ÚNICAMENTE un array JSON (sin texto adicional, sin markdown):
-[
-  {{"idx": <número igual al recibido>, "nombre_final": "<nombre en español>"}},
-  ...
-]
-Debe haber exactamente {len(items_para_claude)} elementos, uno por cada producto recibido.
-
-Productos:
-{lista_json}"""
-
-    try:
-        _max_tok = min(200 * len(items_para_claude) + 500, 8000)
-        llm   = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=_max_tok)
-        resp  = llm.invoke([HumanMessage(content=prompt)])
-        texto = resp.content.strip()
-        if texto.startswith("```"):
-            partes = texto.split("```")
-            texto  = partes[1].lstrip("json").strip() if len(partes) > 1 else texto
-        resultados = json.loads(texto)
-        for r in resultados:
-            local_idx    = r.get("idx")
-            nombre_final = str(r.get("nombre_final") or "").strip()
-            if local_idx is not None and nombre_final and local_idx in local_a_real:
-                productos[local_a_real[local_idx]]["nombre"] = nombre_final
-    except Exception:
-        pass
+    # Procesar en chunks para respetar el límite de tokens
+    for inicio in range(0, len(items_para_claude), _CHUNK_NORMALIZAR):
+        chunk = items_para_claude[inicio: inicio + _CHUNK_NORMALIZAR]
+        _normalizar_chunk(chunk, local_a_real, productos)
 
     return productos
 
@@ -706,8 +719,12 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
     for item in raw:
         _i = item.get("idx")
         if _i is not None and 0 <= _i < len(ordered):
+            nb = item.get("nombre_base")
+            # Descartar si aún contiene chino — el fallback usará prod["nombre"] ya traducido
+            if nb and _tiene_chino(nb):
+                nb = None
             ordered[_i] = {
-                "nombre_base":   item.get("nombre_base"),
+                "nombre_base":   nb,
                 "atributo_tipo": item.get("atributo_tipo"),
                 "atributo_valor": item.get("atributo_valor"),
             }

@@ -2784,7 +2784,7 @@ if st.session_state.get("clasificacion_activa"):
             st.divider()
 
         # ── Botones de acción ─────────────────────────────────────────────────
-        _btn_c1, _btn_c2 = st.columns([3, 1])
+        _btn_c1, _btn_c2, _btn_c3 = st.columns([3, 2, 1])
         with _btn_c1:
             _confirmar = st.button(
                 "✅ Confirmar clasificación y continuar",
@@ -2792,6 +2792,12 @@ if st.session_state.get("clasificacion_activa"):
                 use_container_width=True,
             )
         with _btn_c2:
+            _solo_excels = st.button(
+                "📥 Solo generar Excels (sin crear en Odoo)",
+                use_container_width=True,
+                help="Genera todos los archivos Excel sin modificar Odoo. Útil cuando los productos ya están cargados.",
+            )
+        with _btn_c3:
             if st.session_state.get("clasificacion_reporte_bytes"):
                 st.download_button(
                     "⬇️ Reporte bodega",
@@ -2800,6 +2806,48 @@ if st.session_state.get("clasificacion_activa"):
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+
+        if _solo_excels:
+            # Leer ediciones del usuario en los widgets sin tocar Odoo
+            for _i, _prop in enumerate(_props):
+                _prop["requiere_revision"] = bool(st.session_state.get(f"_cls_rev_{_i}", False))
+                _prop["nota_revision"]     = str(st.session_state.get(f"_cls_nota_{_i}", "") or "")
+                _nb_edit = str(st.session_state.get(f"_cls_nb_{_i}", "") or "").strip()
+                if _nb_edit:
+                    _prop["nombre_base"] = _nb_edit
+                    _prop["nombre"]      = _nb_edit
+
+            renombrar_imagenes_con_sku(_productos_c)
+
+            _fn_base = st.session_state.get("filename", "packing").replace(".xlsx", "")
+            _tc_e    = st.session_state.get("tipo_cambio", 19.0)
+            _cc_e    = st.session_state.get("costo_contenedor", 525000.0)
+
+            with st.spinner("Generando archivos Excel..."):
+                try:
+                    st.session_state.excel_bytes        = generar_excel(_productos_c, _tc_e, _cc_e)
+                except Exception as _ex:
+                    st.warning(f"Excel FERRAFORME: {_ex}")
+                try:
+                    st.session_state.excel_master_bytes = generar_excel_master(_productos_c, _tc_e, _cc_e)
+                except Exception as _ex:
+                    st.warning(f"Excel Master: {_ex}")
+                try:
+                    st.session_state.clasificacion_reporte_bytes = generar_reporte_clasificacion(_props, _fn_base)
+                except Exception as _ex:
+                    st.warning(f"Reporte bodega: {_ex}")
+                try:
+                    st.session_state.purchase_bytes     = generar_excel_purchase(_productos_c, _tc_e, _cc_e)
+                except Exception as _ex:
+                    st.warning(f"Purchase: {_ex}")
+
+            st.session_state.propuestas_para_reintento = _props
+            st.session_state.clasificacion_activa      = False
+            st.session_state.chat.append({
+                "role": "assistant",
+                "content": f"📥 Archivos generados para **{_n_props} productos** (sin crear en Odoo). Descárgalos desde el panel izquierdo."
+            })
+            st.rerun()
 
         if _confirmar:
             # Leer valores de los widgets individuales

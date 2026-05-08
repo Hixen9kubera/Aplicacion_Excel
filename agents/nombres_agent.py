@@ -724,21 +724,22 @@ def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
         return []
 
     _vacio = {"nombre_base": None, "atributo_tipo": None, "atributo_valor": None}
-    lineas = [
-        f"{i}: {p.get('nombre') or p.get('titulo') or f'Producto {i+1}'}"
-        for i, p in enumerate(productos)
-    ]
 
     resultados: list[dict] = []
-    for inicio in range(0, len(lineas), _CHUNK_NOMBRES):
-        chunk = lineas[inicio: inicio + _CHUNK_NOMBRES]
+    for inicio in range(0, len(productos), _CHUNK_NOMBRES):
+        chunk_prods = productos[inicio: inicio + _CHUNK_NOMBRES]
+        # Índices locales (0…chunk_size-1) para que _extraer_chunk pueda reordenar por idx
+        chunk_lineas = [
+            f"{j}: {p.get('nombre') or p.get('titulo') or f'Producto {j+1}'}"
+            for j, p in enumerate(chunk_prods)
+        ]
         try:
-            parcial = _extraer_chunk(chunk)
+            parcial = _extraer_chunk(chunk_lineas)
         except Exception:
             parcial = []
-        while len(parcial) < len(chunk):
+        while len(parcial) < len(chunk_lineas):
             parcial.append(_vacio)
-        resultados.extend(parcial[:len(chunk)])
+        resultados.extend(parcial[:len(chunk_lineas)])
 
     return resultados
 

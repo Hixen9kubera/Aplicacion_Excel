@@ -87,11 +87,13 @@ def normalizar_nombres_productos(productos: list[dict]) -> list[dict]:
     prompt = f"""Tienes una lista de productos importados de China. Cada uno tiene un nombre principal y opcionalmente un nombre alternativo (pueden estar en chino, inglés o español).
 
 Tu tarea para cada producto:
-1. Elige el nombre MÁS ESPECÍFICO y DESCRIPTIVO entre "nombre" y "nombre_alt" (si existe).
-   Prefiere el que incluya más detalles: color, material, modelo, capacidad, etc.
-2. Si el nombre elegido está en chino o inglés → tradúcelo al español comercial y claro (máx 80 caracteres).
-3. Si ya está en español → devuélvelo tal cual, sin cambios.
-4. El nombre final debe describir con precisión el producto real (no uses nombres genéricos si hay uno más específico).
+1. PRIORIDAD de fuente:
+   a) Si "nombre" está en chino → úsalo como base (es el más descriptivo para estos productos).
+   b) Si "nombre" NO está en chino pero "nombre_alt" sí → usa "nombre_alt" como base.
+   c) Si ninguno está en chino → usa el que tenga más detalles específicos (color, talla, material, modelo, capacidad, etc.).
+2. Traduce el nombre elegido al español comercial claro (máx 80 caracteres). Siempre en español.
+3. Si el nombre incluye talla o tamaño (XS/S/M/L/XL/XXL, números de talla, etc.) consérvala en el nombre final — es importante para clasificar ropa y calzado correctamente.
+4. El nombre final debe describir el producto con precisión. No uses nombres genéricos si hay uno más específico.
 5. Devuelve EXACTAMENTE los mismos valores de "idx" que recibiste — no los cambies ni renumeres.
 
 Devuelve ÚNICAMENTE un array JSON (sin texto adicional, sin markdown):
@@ -675,10 +677,11 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
         "Para cada uno extrae:\n"
         "- nombre_base: nombre base SIN color, talla o material específico. "
         "SIEMPRE en español — si el nombre está en inglés o chino, tradúcelo al español comercial claro.\n"
-        "- atributo_tipo: \"Color\", \"Talla\", \"Material\", o null si no hay atributo distinguible\n"
-        "- atributo_valor: valor concreto (\"Azul\", \"XL\", \"Madera\") o null\n\n"
+        "- atributo_tipo: \"Color\", \"Talla\", \"Material\", o null si no hay atributo distinguible. "
+        "Para ropa y calzado usa \"Talla\" si el nombre incluye XS/S/M/L/XL/XXL o número de talla.\n"
+        "- atributo_valor: valor concreto en español (\"Azul\", \"XL\", \"Madera\") o null\n\n"
         "IMPORTANTE: Si dos o más productos son el mismo tipo base con distinto color/talla/material "
-        "(ej: \"Mesa Negra\" y \"Mesa Blanca\"), deben tener el MISMO nombre_base.\n\n"
+        "(ej: \"Camiseta Talla M\" y \"Camiseta Talla L\"), deben tener el MISMO nombre_base (\"Camiseta\").\n\n"
         "Responde SOLO con JSON array (mismo orden, sin texto extra):\n"
         "[{\"nombre_base\":\"...\",\"atributo_tipo\":\"...\",\"atributo_valor\":\"...\"}, ...]\n\n"
         "Productos:\n" + "\n".join(lineas)

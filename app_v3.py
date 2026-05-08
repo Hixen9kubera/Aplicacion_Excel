@@ -649,11 +649,11 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                 prop["duplicado_de_idx"] = entrada["variantes"][att_cod]["idx"]
                 prop["sku"]              = entrada["variantes"][att_cod]["sku"]
             else:
-                # Nueva variante del mismo padre
+                # Nueva variante del mismo padre — el número es fijo (hereda del padre)
                 prop["accion"] = "crear_variante"
                 sku_var = _sku_mismo_numero(entrada["subcod"], entrada["numero"], att_cod)
-                if skus_odoo:
-                    sku_var = validar_sku_vs_odoo(sku_var, skus_odoo)["sku_ajustado"]
+                # NO llamar validar_sku_vs_odoo: el número lo hereda del padre y no
+                # debe ajustarse aunque haya SKUs con número mayor en Odoo.
                 prop["sku"] = sku_var
                 entrada["variantes"][att_cod] = {"sku": sku_var, "idx": i}
         else:
@@ -685,8 +685,9 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                 })
                 if att_cod:
                     sku_var = _sku_mismo_numero(sub_odoo, num_odoo, att_cod)
-                    if skus_odoo:
-                        sku_var = validar_sku_vs_odoo(sku_var, skus_odoo)["sku_ajustado"]
+                    # NO llamar validar_sku_vs_odoo: padre encontrado en Odoo tiene
+                    # número fijo (ej. ILUM-0011). La variante hereda ese número
+                    # y solo cambia el atributo → ILUM-0011-EST, nunca ILUM-0017-EST.
                     prop["sku"]    = sku_var
                     prop["accion"] = "crear_variante"
                 else:

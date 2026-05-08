@@ -796,8 +796,8 @@ def enriquecer_vision_bloque(offset: int, block_size: int = 50) -> None:
         })
         prod = prop["producto"]
         prod.update({
-            "descripcion": datos.get("descripcion", ""),
-            "categoria":   datos.get("categoria", ""),
+            "descripcion": datos.get("descripcion") or prod.get("descripcion", ""),
+            "categoria":   datos.get("categoria")   or prod.get("categoria", ""),
             "atributo":    datos.get("atributo_desc") or prod.get("atributo", ""),
             "titulo":      datos.get("titulo") or prod.get("nombre", ""),
         })
@@ -3233,17 +3233,23 @@ if st.session_state.get("clasificacion_activa"):
 
             renombrar_imagenes_con_sku(_productos_c)
 
-            # Rellenar descripcion/categoria/atributo desde datos_vision (por si Phase 2 no corrió)
+            # Rellenar descripcion/categoria/atributo — Vision tiene prioridad; texto como fallback
             for _prop in _props:
                 _p  = _prop.get("producto")
                 _dv = _prop.get("datos_vision", {})
                 if _p is not None:
                     if not _p.get("descripcion"):
-                        _p["descripcion"] = _dv.get("descripcion", "")
+                        _p["descripcion"] = (_dv.get("descripcion")
+                                             or _prop.get("nombre_base")
+                                             or _p.get("nombre", ""))
                     if not _p.get("categoria"):
-                        _p["categoria"]   = _dv.get("categoria", "Varios")
+                        _sub = _prop.get("subcategoria_cod") or _dv.get("subcategoria_cod") or "VAR"
+                        _p["categoria"] = (_dv.get("categoria")
+                                           or SUBCATEGORIAS.get(_sub, "Varios"))
                     if not _p.get("atributo"):
-                        _p["atributo"]    = _dv.get("atributo_desc") or _prop.get("atributo_valor", "") or "Estándar"
+                        _p["atributo"] = (_dv.get("atributo_desc")
+                                          or _prop.get("atributo_valor", "")
+                                          or "Estándar")
 
             _fn_base = st.session_state.get("filename", "packing").replace(".xlsx", "")
             _tc_e    = st.session_state.get("tipo_cambio", 19.0)
@@ -3296,17 +3302,23 @@ if st.session_state.get("clasificacion_activa"):
                     _p["nombre_base"] = _nb_por_padre[_p["padre_sku"]]
                     _p["nombre"]      = _nb_por_padre[_p["padre_sku"]]
 
-            # Rellenar descripcion/categoria/atributo desde datos_vision (por si Phase 2 no corrió)
+            # Rellenar descripcion/categoria/atributo — Vision tiene prioridad; texto como fallback
             for _prop in _props:
                 _p  = _prop.get("producto")
                 _dv = _prop.get("datos_vision", {})
                 if _p is not None:
                     if not _p.get("descripcion"):
-                        _p["descripcion"] = _dv.get("descripcion", "")
+                        _p["descripcion"] = (_dv.get("descripcion")
+                                             or _prop.get("nombre_base")
+                                             or _p.get("nombre", ""))
                     if not _p.get("categoria"):
-                        _p["categoria"]   = _dv.get("categoria", "Varios")
+                        _sub = _prop.get("subcategoria_cod") or _dv.get("subcategoria_cod") or "VAR"
+                        _p["categoria"] = (_dv.get("categoria")
+                                           or SUBCATEGORIAS.get(_sub, "Varios"))
                     if not _p.get("atributo"):
-                        _p["atributo"]    = _dv.get("atributo_desc") or _prop.get("atributo_valor", "") or "Estándar"
+                        _p["atributo"] = (_dv.get("atributo_desc")
+                                          or _prop.get("atributo_valor", "")
+                                          or "Estándar")
 
             # Renombrar imágenes ANTES de subir a Odoo (pueden estar con stem original)
             _, _errs_ren_c = renombrar_imagenes_con_sku(_productos_c)

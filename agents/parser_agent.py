@@ -667,6 +667,7 @@ def renombrar_imagenes_con_sku(productos: list[dict]) -> tuple[int, list[str]]:
                 if nueva_ruta == archivo:
                     # Ya tiene el nombre correcto — no borrar
                     prod["imagen_temp_stem"] = sku
+                    prod["imagen_temp_path"] = str(nueva_ruta)
                     encontrado = True
                     break
                 if nueva_ruta.exists():
@@ -676,11 +677,13 @@ def renombrar_imagenes_con_sku(productos: list[dict]) -> tuple[int, list[str]]:
                     except Exception:
                         pass
                     prod["imagen_temp_stem"] = sku
+                    prod["imagen_temp_path"] = str(nueva_ruta)
                     encontrado = True
                     break
                 try:
                     archivo.rename(nueva_ruta)
                     prod["imagen_temp_stem"] = sku
+                    prod["imagen_temp_path"] = str(nueva_ruta)
                     renombradas += 1
                 except Exception as e:
                     errores.append(f"No se pudo renombrar imagen '{stem_buscado}' → '{sku}': {e}")

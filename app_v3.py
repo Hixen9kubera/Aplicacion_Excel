@@ -794,6 +794,7 @@ def enriquecer_vision_bloque(offset: int, block_size: int = 50) -> None:
         prod.update({
             "descripcion": datos.get("descripcion", ""),
             "categoria":   datos.get("categoria", ""),
+            "atributo":    datos.get("atributo_desc") or prod.get("atributo", ""),
             "titulo":      datos.get("titulo") or prod.get("nombre", ""),
         })
         prop["_vision_pendiente"] = False
@@ -3217,6 +3218,18 @@ if st.session_state.get("clasificacion_activa"):
 
             renombrar_imagenes_con_sku(_productos_c)
 
+            # Rellenar descripcion/categoria/atributo desde datos_vision (por si Phase 2 no corrió)
+            for _prop in _props:
+                _p  = _prop.get("producto")
+                _dv = _prop.get("datos_vision", {})
+                if _p is not None:
+                    if not _p.get("descripcion"):
+                        _p["descripcion"] = _dv.get("descripcion", "")
+                    if not _p.get("categoria"):
+                        _p["categoria"]   = _dv.get("categoria", "Varios")
+                    if not _p.get("atributo"):
+                        _p["atributo"]    = _dv.get("atributo_desc") or _prop.get("atributo_valor", "") or "Estándar"
+
             _fn_base = st.session_state.get("filename", "packing").replace(".xlsx", "")
             _tc_e    = st.session_state.get("tipo_cambio", 19.0)
             _cc_e    = st.session_state.get("costo_contenedor", 525000.0)
@@ -3267,6 +3280,18 @@ if st.session_state.get("clasificacion_activa"):
                 if _p["accion"] == "duplicado" and _p.get("padre_sku") in _nb_por_padre:
                     _p["nombre_base"] = _nb_por_padre[_p["padre_sku"]]
                     _p["nombre"]      = _nb_por_padre[_p["padre_sku"]]
+
+            # Rellenar descripcion/categoria/atributo desde datos_vision (por si Phase 2 no corrió)
+            for _prop in _props:
+                _p  = _prop.get("producto")
+                _dv = _prop.get("datos_vision", {})
+                if _p is not None:
+                    if not _p.get("descripcion"):
+                        _p["descripcion"] = _dv.get("descripcion", "")
+                    if not _p.get("categoria"):
+                        _p["categoria"]   = _dv.get("categoria", "Varios")
+                    if not _p.get("atributo"):
+                        _p["atributo"]    = _dv.get("atributo_desc") or _prop.get("atributo_valor", "") or "Estándar"
 
             # Renombrar imágenes ANTES de subir a Odoo (pueden estar con stem original)
             _, _errs_ren_c = renombrar_imagenes_con_sku(_productos_c)

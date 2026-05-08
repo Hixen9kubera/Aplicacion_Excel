@@ -696,17 +696,23 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
         "SIEMPRE en español. Dos productos del mismo tipo deben compartir el MISMO nombre_base.\n"
         "  Ej: 'Sudadera Azul Talla M' → 'Sudadera'\n"
         "  Ej: 'Bata de seda M' y 'Bata de seda XL' → 'Bata de seda'\n\n"
-        "- atributo_tipo: elige UNO según esta prioridad estricta:\n"
-        "  1. 'Talla' — si el nombre incluye XS/S/M/L/XL/XXL/XXXL, número de talla (36/38/40…) o 'unitalla'. "
-        "SIEMPRE prioriza talla sobre color y material para ropa, calzado y accesorios de vestir.\n"
-        "  2. 'Color' — si hay un color explícito y NO hay talla\n"
-        "  3. 'Material' — si hay material explícito y NO hay talla ni color\n"
+        "- atributo_tipo y atributo_valor: REGLA DE ORO — si el nombre tiene TALLA, úsala SIEMPRE "
+        "aunque también haya color. La talla es el identificador principal de variante en ropa y calzado.\n"
+        "  Prioridad estricta:\n"
+        "  1. 'Talla' — XS/S/M/L/XL/XXL/3XL/XXXL al final o en cualquier parte del nombre, "
+        "número de talla (36/37/38…), 'unitalla'. "
+        "IMPORTANTE: si el nombre dice 'negro S' o 'azul M' o 'negra S', la talla es S o M, NO el color.\n"
+        "  2. 'Color' — SOLO si no hay ninguna talla en el nombre\n"
+        "  3. 'Material' — SOLO si no hay talla ni color\n"
         "  4. null — si no hay ningún atributo diferenciador\n\n"
-        "- atributo_valor: el valor exacto del atributo elegido:\n"
-        "  • Para Talla: devuelve SOLO el código de talla (M, L, XL, XXL, 38, Unitalla…), nunca 'Talla M'\n"
-        "  • Para Color: nombre del color en español (Azul, Negro, Multicolor…)\n"
-        "  • Para Material: nombre del material en español (Madera, Metal…)\n"
-        "  • null si atributo_tipo es null\n\n"
+        "  atributo_valor para Talla: SOLO el código (S, M, L, XL, XXL, 3XL, 38…), NUNCA 'Talla M'\n"
+        "  atributo_valor para Color: nombre en español (Negro, Azul…)\n\n"
+        "EJEMPLOS OBLIGATORIOS (sigue este patrón):\n"
+        "  'Sudadera negra S'        → nombre_base:'Sudadera',          tipo:'Talla', valor:'S'\n"
+        "  'Chaleco acolchado negro 3XL' → nombre_base:'Chaleco acolchado', tipo:'Talla', valor:'3XL'\n"
+        "  'Camiseta azul M'         → nombre_base:'Camiseta',           tipo:'Talla', valor:'M'\n"
+        "  'Pantalón negro'          → nombre_base:'Pantalón',           tipo:'Color', valor:'Negro'\n"
+        "  'Silla de madera'         → nombre_base:'Silla',              tipo:'Material', valor:'Madera'\n\n"
         "Responde SOLO con JSON array (sin texto extra):\n"
         "[{\"idx\":0,\"nombre_base\":\"...\",\"atributo_tipo\":\"...\",\"atributo_valor\":\"...\"}, ...]\n\n"
         "Productos:\n" + "\n".join(lineas)
@@ -782,7 +788,7 @@ _SUBCAT_VALIDAS = (
 )
 _ATTR_VALIDOS = (
     "NEG,BLN,GRI,ROJ,AZL,VER,AMA,ROS,NAR,MOR,CAF,BEI,MUL,PLA,DOR,"
-    "XS,S,M,L,XL,XXL,UNI,MAD,MET,TEL,CUE,EST,PRE,ECO,INF,ADU"
+    "XS,S,M,L,XL,XXL,3XL,UNI,MAD,MET,TEL,CUE,EST,PRE,ECO,INF,ADU"
 )
 _SUBCAT_SET = set(_SUBCAT_VALIDAS.replace(" ", "").split(","))
 _ATTR_SET   = set(_ATTR_VALIDOS.replace(" ", "").split(","))

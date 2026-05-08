@@ -133,7 +133,7 @@ ATRIBUTOS = {
     "MUL": "Multicolor","PLA": "Plateado","DOR": "Dorado",
     # TALLAS
     "XS": "Extra Small","S": "Small",  "M": "Medium",    "L": "Large",
-    "XL": "Extra Large","XXL": "Extra Extra Large","UNI": "Talla Única",
+    "XL": "Extra Large","XXL": "Extra Extra Large","3XL": "3XL","UNI": "Talla Única",
     # MATERIALES
     "MAD": "Madera",  "MET": "Metal",   "TEL": "Tela",    "CUE": "Cuero",
     # OTROS
@@ -493,6 +493,10 @@ def _atributo_cod_desde_valor(atributo_valor: str | None) -> str | None:
     if val_lower.startswith("talla "):
         val = val[6:].strip()
         val_lower = val.lower()
+    # Normalizar alias de tallas grandes
+    _alias = {"xxxl": "3XL", "3xl": "3XL", "xxl": "XXL"}
+    if val_lower in _alias:
+        return _alias[val_lower]
     for cod, desc in ATRIBUTOS.items():
         if desc.lower() == val_lower or cod.lower() == val_lower:
             return cod
@@ -1355,7 +1359,7 @@ def _parsear_desc_interna(texto: str) -> dict:
 
 def _cod_atrib_a_tipo(cod: str) -> str:
     _COLORES    = {"NEG","BLN","GRI","ROJ","AZL","VER","AMA","ROS","NAR","MOR","CAF","BEI","MUL","PLA","DOR"}
-    _TALLAS     = {"XS","S","M","L","XL","XXL","UNI"}
+    _TALLAS     = {"XS","S","M","L","XL","XXL","3XL","UNI"}
     _MATERIALES = {"MAD","MET","TEL","CUE"}
     if cod in _COLORES:
         return "Color"

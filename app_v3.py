@@ -687,11 +687,15 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                     sub_odoo = partes[0]
                 except (ValueError, IndexError):
                     num_odoo, sub_odoo = 1, sub_cod
+                # padre_sku siempre SUBCAT-NNNN (sin atributo), aunque default_code en Odoo lo traiga completo
+                sku_padre_base = f"{sub_odoo}-{num_odoo:04d}"
+                if st.session_state.get("modo_prueba") and "_test" in sku_odoo:
+                    sku_padre_base += "_test"
                 prop.update({
                     "padre_fuente":      "odoo",
                     "padre_odoo_id":     prod_odoo.get("id"),
                     "padre_odoo_nombre": prod_odoo.get("name", ""),
-                    "padre_sku":         sku_odoo,
+                    "padre_sku":         sku_padre_base,
                     "confianza_padre":   candidato["score"],
                 })
                 if att_cod:
@@ -705,7 +709,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                     prop["sku"]    = sku_odoo
                     prop["accion"] = "reutilizar"
                 registro[nombre_base] = {
-                    "sku_padre": sku_odoo, "subcod": sub_odoo, "numero": num_odoo,
+                    "sku_padre": sku_padre_base, "subcod": sub_odoo, "numero": num_odoo,
                     "odoo_id": prod_odoo.get("id"), "odoo_nombre": prod_odoo.get("name", ""),
                     "padre_idx": i,
                     "padre_phash": _phash_by_idx.get(i),

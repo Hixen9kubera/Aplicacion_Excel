@@ -469,10 +469,15 @@ def enriquecer_con_imagenes(file_bytes: bytes, productos: list[dict]) -> tuple[l
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _generar_sku_padre(subcategoria_cod: str) -> str:
-    """Genera SKU de producto padre: SUBCAT-NNNN (sin atributo)."""
+    """
+    Genera SKU de producto padre: SUBCAT-NNNN (sin atributo).
+
+    NO valida contra SUBCATEGORIAS — sincronizar_contadores_con_odoo ya sembró
+    el contador para cualquier sub_cod que exista en Odoo (incluidos códigos como
+    "LUZ", "MONT", etc. que Vision puede devolver y que ya tienen historial).
+    Así el número incrementa correctamente desde el último de Odoo en esta sesión.
+    """
     sub = subcategoria_cod.strip().upper() if subcategoria_cod else _SUBCAT_DEFAULT
-    if sub not in SUBCATEGORIAS:
-        sub = _SUBCAT_DEFAULT
     contadores = st.session_state.setdefault("sku_contadores", {})
     contadores[sub] = contadores.get(sub, 0) + 1
     sku = f"{sub}-{contadores[sub]:04d}"
@@ -706,7 +711,18 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                 if att_cod:
                     sku_var = _sku_mismo_numero(sub_cod, num_nuevo, att_cod)
                     if skus_odoo:
-                        sku_var = validar_sku_vs_odoo(sku_var, skus_odoo)["sku_ajustado"]
+                        _val = validar_sku_vs_odoo(sku_var, skus_odoo)
+                        sku_var = _val["sku_ajustado"]
+                        # Si validar_sku_vs_odoo ajustó el número (conflicto con Odoo),
+                        # actualizar el contador de sesión para que el siguiente padre
+                        # parta de ahí y no vuelva a generar el mismo número.
+                        if _val["nuevo_num"] is not None:
+                            num_nuevo = _val["nuevo_num"]
+                            st.session_state.setdefault("sku_contadores", {})[sub_cod] = num_nuevo
+                            sku_padre = f"{sub_cod}-{num_nuevo:04d}"
+                            if st.session_state.get("modo_prueba"):
+                                sku_padre += "_test"
+                            prop["padre_sku"] = sku_padre
                     prop["sku"]    = sku_var
                     prop["accion"] = "crear_padre_y_variante"
                 else:

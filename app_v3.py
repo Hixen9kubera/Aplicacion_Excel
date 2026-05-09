@@ -588,7 +588,8 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
         datos   = datos_vision[i]
         clas    = clasificaciones[i] if i < len(clasificaciones) else {}
         row_num = prod.get("fila_excel_0idx", i + 1)
-        nombre      = str(prod.get("nombre") or f"Producto {i+1}").strip()
+        nombre_original = str(prod.get("nombre") or f"Producto {i+1}").strip()
+        nombre      = nombre_original
         nombre_base = _phash_override.get(i) or str(clas.get("nombre_base") or nombre).strip()
         # Sincronizar nombre del producto con nombre_base (ya en español)
         if nombre_base and nombre_base != nombre:
@@ -598,6 +599,13 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
         _talla_val  = clas.get("atributo_talla") or None
         _color_cod  = _atributo_cod_desde_valor(_color_val)
         _talla_cod  = _atributo_cod_desde_valor(_talla_val)
+        # Fallback de talla: buscar en el nombre original con regex (gratis, sin API)
+        if not _talla_cod:
+            import re as _re
+            _m_talla = _re.search(r'\b(3XL|XXL|XL|XS|[SML])\b', nombre_original)
+            if _m_talla:
+                _talla_cod = _m_talla.group(1).upper()
+                _talla_val = _talla_cod
         if _color_cod and _talla_cod:
             att_cod   = f"{_color_cod}-{_talla_cod}"
             att_tipo  = "Color-Talla"

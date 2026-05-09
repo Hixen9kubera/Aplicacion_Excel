@@ -3278,9 +3278,20 @@ if st.session_state.get("clasificacion_activa"):
                 _dv = _prop.get("datos_vision", {})
                 if _p is not None:
                     if not _p.get("descripcion"):
-                        _p["descripcion"] = (_dv.get("descripcion")
-                                             or _prop.get("nombre_base")
-                                             or _p.get("nombre", ""))
+                        _vision_desc = (_dv.get("descripcion") or "").strip()
+                        _nombre_ref  = (_prop.get("nombre_base") or _p.get("nombre", "")).strip()
+                        if _vision_desc and _vision_desc.lower() != _nombre_ref.lower():
+                            _p["descripcion"] = _vision_desc
+                        else:
+                            _dp = [_nombre_ref] if _nombre_ref else []
+                            _at = _prop.get("atributo_tipo"); _av = _prop.get("atributo_valor")
+                            if _at and _av:
+                                _dp.append(f"{_at}: {_av}")
+                            if _p.get("material"):
+                                _dp.append(f"Material: {_p['material']}")
+                            if _p.get("uso"):
+                                _dp.append(_p["uso"])
+                            _p["descripcion"] = " – ".join(_dp)
                     if not _p.get("categoria"):
                         _sub = _prop.get("subcategoria_cod") or _dv.get("subcategoria_cod") or "VAR"
                         _p["categoria"] = (_dv.get("categoria")
@@ -3347,9 +3358,20 @@ if st.session_state.get("clasificacion_activa"):
                 _dv = _prop.get("datos_vision", {})
                 if _p is not None:
                     if not _p.get("descripcion"):
-                        _p["descripcion"] = (_dv.get("descripcion")
-                                             or _prop.get("nombre_base")
-                                             or _p.get("nombre", ""))
+                        _vision_desc = (_dv.get("descripcion") or "").strip()
+                        _nombre_ref  = (_prop.get("nombre_base") or _p.get("nombre", "")).strip()
+                        if _vision_desc and _vision_desc.lower() != _nombre_ref.lower():
+                            _p["descripcion"] = _vision_desc
+                        else:
+                            _dp = [_nombre_ref] if _nombre_ref else []
+                            _at = _prop.get("atributo_tipo"); _av = _prop.get("atributo_valor")
+                            if _at and _av:
+                                _dp.append(f"{_at}: {_av}")
+                            if _p.get("material"):
+                                _dp.append(f"Material: {_p['material']}")
+                            if _p.get("uso"):
+                                _dp.append(_p["uso"])
+                            _p["descripcion"] = " – ".join(_dp)
                     if not _p.get("categoria"):
                         _sub = _prop.get("subcategoria_cod") or _dv.get("subcategoria_cod") or "VAR"
                         _p["categoria"] = (_dv.get("categoria")

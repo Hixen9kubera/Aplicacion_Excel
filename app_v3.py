@@ -598,6 +598,23 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
         _talla_val  = clas.get("atributo_talla") or None
         _color_cod  = _atributo_cod_desde_valor(_color_val)
         _talla_cod  = _atributo_cod_desde_valor(_talla_val)
+        # Fallback: si no se detectó color, buscarlo en el nombre del producto
+        if not _color_cod:
+            _COLORES_ES = {
+                "negro": "NEG", "negra": "NEG", "blanco": "BLN", "blanca": "BLN",
+                "gris": "GRI", "rojo": "ROJ", "roja": "ROJ", "azul": "AZL",
+                "verde": "VER", "amarillo": "AMA", "amarilla": "AMA",
+                "rosa": "ROS", "rosado": "ROS", "naranja": "NAR",
+                "morado": "MOR", "morada": "MOR", "cafe": "CAF", "café": "CAF",
+                "beige": "BEI", "plateado": "PLA", "plateada": "PLA",
+                "dorado": "DOR", "dorada": "DOR", "multicolor": "MUL",
+            }
+            _nom_lower = nombre.lower()
+            for _palabra, _cod in _COLORES_ES.items():
+                if _palabra in _nom_lower.split() or f" {_palabra} " in f" {_nom_lower} ":
+                    _color_cod = _cod
+                    _color_val = _palabra.capitalize()
+                    break
         if _color_cod and _talla_cod:
             att_cod   = f"{_color_cod}-{_talla_cod}"
             att_tipo  = "Color-Talla"

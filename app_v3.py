@@ -1201,6 +1201,9 @@ def crear_clasificacion_en_odoo(propuestas: list[dict],
                 resultados.append(f"✅ Variante creada: `{sku}` — {nombre}{_rev_sfx}")
 
             elif accion == "reutilizar":
+                tmpl_id = prop.get("padre_odoo_id")
+                if tmpl_id:
+                    _write_campos_custom(tmpl_id, prod, precio_usd, cbm_pz)
                 resultados.append(f"♻️ Reutilizado: `{sku}` — {nombre}")
 
         except Exception as e:

@@ -594,9 +594,26 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
         if nombre_base and nombre_base != nombre:
             prod["nombre"] = nombre_base
             nombre = nombre_base
-        att_tipo    = clas.get("atributo_tipo")
-        att_valor   = clas.get("atributo_valor")
-        att_cod     = _atributo_cod_desde_valor(att_valor) or datos.get("atributo_cod")
+        _color_val  = clas.get("atributo_color") or None
+        _talla_val  = clas.get("atributo_talla") or None
+        _color_cod  = _atributo_cod_desde_valor(_color_val)
+        _talla_cod  = _atributo_cod_desde_valor(_talla_val)
+        if _color_cod and _talla_cod:
+            att_cod   = f"{_color_cod}-{_talla_cod}"
+            att_tipo  = "Color-Talla"
+            att_valor = f"{_color_val} {_talla_val}"
+        elif _talla_cod:
+            att_cod   = _talla_cod
+            att_tipo  = "Talla"
+            att_valor = _talla_val
+        elif _color_cod:
+            att_cod   = _color_cod
+            att_tipo  = "Color"
+            att_valor = _color_val
+        else:
+            att_cod   = datos.get("atributo_cod") or None
+            att_tipo  = None
+            att_valor = None
         sub_cod     = datos.get("subcategoria_cod") or "VAR"
 
         prop: dict = {

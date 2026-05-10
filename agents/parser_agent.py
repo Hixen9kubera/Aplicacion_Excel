@@ -620,13 +620,21 @@ def guardar_imagenes_temp(imagenes: dict[int, dict], productos: list[dict]) -> t
     guardadas = 0
     for row_num, img in imagenes.items():
         # Buscar candidato en ±3 filas sin imagen ya asignada.
-        # Prioridad: distancia exacta primero (evita desfases cuando row_anchors están
-        # desplazados), score como desempate (producto real > fila etiqueta).
+        # Si la fila exacta tiene datos numéricos (score>0), asignar ahí directamente
+        # para evitar desfases en PLs con row_anchors desplazados.
+        # Si la fila exacta es una etiqueta (score=0), usar score-first para que la
+        # imagen vaya al producto real más cercano.
         candidates: list[tuple[int, int, int]] = []
-        for delta in range(-3, 4):
-            candidate = fila_a_idx.get(row_num + delta)
-            if candidate is not None and "imagen_temp_stem" not in productos[candidate]:
-                candidates.append((abs(delta), -_score(productos[candidate]), candidate))
+        _exact = fila_a_idx.get(row_num)
+        if (_exact is not None
+                and "imagen_temp_stem" not in productos[_exact]
+                and _score(productos[_exact]) > 0):
+            candidates = [(0, 0, _exact)]
+        else:
+            for delta in range(-3, 4):
+                candidate = fila_a_idx.get(row_num + delta)
+                if candidate is not None and "imagen_temp_stem" not in productos[candidate]:
+                    candidates.append((-_score(productos[candidate]), abs(delta), candidate))
 
         if not candidates:
             continue

@@ -696,18 +696,23 @@ def _extraer_chunk(lineas: list[str]) -> list[dict]:
         "SIEMPRE en español. Dos productos del mismo tipo deben compartir el MISMO nombre_base.\n"
         "  Ej: 'Sudadera Azul Talla M' → 'Sudadera'\n"
         "  Ej: 'Bata de seda M' y 'Bata de seda XL' → 'Bata de seda'\n\n"
-        "- atributo_color: color del producto en español si aparece en el nombre (Negro, Rosa, Azul…), "
-        "o null si no hay color explícito.\n"
-        "- atributo_talla: talla si aparece en el nombre. Devuelve SOLO el código: "
+        "- atributo_color: color del producto en español si aparece en el nombre traducido O en el "
+        "original chino entre corchetes [original: …]. Colores chinos frecuentes: "
+        "黑/黑色=Negro, 白/白色=Blanco, 红/红色=Rojo, 粉/粉色/粉红=Rosa, 蓝/蓝色=Azul, "
+        "绿/绿色=Verde, 黄/黄色=Amarillo, 灰/灰色=Gris, 紫/紫色=Morado, 橙/橙色=Naranja, "
+        "棕/棕色=Café, 金/金色=Dorado, 银/银色=Plateado. Devuelve null solo si no hay ningún color.\n"
+        "- atributo_talla: talla si aparece en el nombre o el original. Devuelve SOLO el código: "
         "XS/S/M/L/XL/XXL/3XL o número (36, 38…) o 'Unitalla'. NUNCA 'Talla M', solo 'M'. "
         "Null si no hay talla.\n\n"
         "EJEMPLOS OBLIGATORIOS:\n"
-        "  'Sudadera negra S'            → color:'Negro',  talla:'S'\n"
-        "  'Chaleco negro 3XL'           → color:'Negro',  talla:'3XL'\n"
-        "  'Camiseta azul M'             → color:'Azul',   talla:'M'\n"
-        "  'Pantalón negro'              → color:'Negro',  talla:null\n"
-        "  'Camiseta talla L'            → color:null,     talla:'L'\n"
-        "  'Silla de madera'             → color:null,     talla:null\n\n"
+        "  'Sudadera negra S'                                    → color:'Negro',  talla:'S'\n"
+        "  'Estuche de maquillaje [original: 化妆包黑色]'         → color:'Negro',  talla:null\n"
+        "  'Estuche de maquillaje [original: 化妆包粉色]'         → color:'Rosa',   talla:null\n"
+        "  'Chaleco negro 3XL'                                   → color:'Negro',  talla:'3XL'\n"
+        "  'Camiseta azul M'                                     → color:'Azul',   talla:'M'\n"
+        "  'Pantalón negro'                                      → color:'Negro',  talla:null\n"
+        "  'Camiseta talla L'                                    → color:null,     talla:'L'\n"
+        "  'Silla de madera'                                     → color:null,     talla:null\n\n"
         "Responde SOLO con JSON array (sin texto extra):\n"
         "[{\"idx\":0,\"nombre_base\":\"...\",\"atributo_color\":\"...\",\"atributo_talla\":\"...\"}, ...]\n\n"
         "Productos:\n" + "\n".join(lineas)
@@ -754,11 +759,16 @@ def _extraer_nombre_base_atributo_batch(productos: list[dict]) -> list[dict]:
     resultados: list[dict] = []
     for inicio in range(0, len(productos), _CHUNK_NOMBRES):
         chunk_prods = productos[inicio: inicio + _CHUNK_NOMBRES]
-        # Índices locales (0…chunk_size-1) para que _extraer_chunk pueda reordenar por idx
-        chunk_lineas = [
-            f"{j}: {p.get('nombre') or p.get('titulo') or f'Producto {j+1}'}"
-            for j, p in enumerate(chunk_prods)
-        ]
+        # Incluir nombre chino original entre corchetes para que Haiku detecte colores
+        chunk_lineas = []
+        for j, p in enumerate(chunk_prods):
+            nombre_es = p.get('nombre') or p.get('titulo') or f'Producto {j+1}'
+            nombre_zh = str(p.get('nombre_chino_orig') or '').strip()
+            if nombre_zh and _tiene_chino(nombre_zh) and nombre_zh != nombre_es:
+                chunk_lineas.append(f"{j}: {nombre_es} [original: {nombre_zh}]")
+            else:
+                chunk_lineas.append(f"{j}: {nombre_es}")
+
         try:
             parcial = _extraer_chunk(chunk_lineas)
         except Exception:

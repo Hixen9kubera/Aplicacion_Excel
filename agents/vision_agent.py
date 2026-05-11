@@ -108,8 +108,8 @@ def _build_vision_prompt(contexto: dict | None = None) -> str:
         '  "descripcion": "descripción en español destacando material, uso y características principales (máx 120 caracteres)",\n'
         '  "categoria": "categoría principal en español",\n'
         f'  "subcategoria_cod": "SOLO uno de estos códigos — basa tu elección en el nombre del producto Y en la imagen: {_SUBCAT_OPCIONES}",\n'
-        f'  "atributo_cod": "SOLO uno de estos códigos (elige según color, material o característica principal): {_ATTR_OPCIONES}",\n'
-        '  "atributo_desc": "descripción del atributo principal: color, material o característica"\n'
+        f'  "atributo_cod": "SOLO uno de estos códigos. PRIORIDAD: si el producto tiene un color predominante visible usa el código de color (NEG=negro, BLN=blanco, GRI=gris, ROJ=rojo, AZL=azul, VER=verde, AMA=amarillo, ROS=rosa/pink, NAR=naranja, MOR=morado, CAF=café/beige oscuro, BEI=beige, MUL=multicolor, PLA=plateado, DOR=dorado). Usa EST solo si el color no es relevante o el producto es neutro. Opciones completas: {_ATTR_OPCIONES}",\n'
+        '  "atributo_desc": "color principal del producto o su característica diferenciadora (ej: \'Rosa\', \'Negro\', \'Azul marino\', \'Metal plateado\')"\n'
         "}}\n"
         "Solo JSON, sin texto adicional."
     )

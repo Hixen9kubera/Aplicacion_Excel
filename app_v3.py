@@ -591,6 +591,8 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
         nombre_original = str(prod.get("nombre") or f"Producto {i+1}").strip()
         nombre      = nombre_original
         nombre_base = _phash_override.get(i) or str(clas.get("nombre_base") or nombre).strip()
+        # Quitar sufijos #N que el parser añade a nombres duplicados (causarían grupos distintos)
+        nombre_base = re.sub(r'\s*#\d+$', '', nombre_base).strip()
         # Sincronizar nombre del producto con nombre_base (ya en español)
         if nombre_base and nombre_base != nombre:
             prod["nombre"] = nombre_base
@@ -1264,6 +1266,14 @@ def generar_excel_tool(productos: List[dict] | None = None) -> str:
     st.session_state.excel_bytes  = excel_bytes
     st.session_state.master_bytes = master_bytes
     st.session_state.productos    = prods
+
+    # Agregar SKUs recién subidos a odoo_skus para evitar duplicados en la misma sesión
+    _nuevos_skus_tool = [p.get("sku", "") for p in prods if p.get("sku")]
+    if _nuevos_skus_tool:
+        _skus_set_tool = set(st.session_state.get("odoo_skus", []))
+        _skus_set_tool.update(_nuevos_skus_tool)
+        st.session_state.odoo_skus = sorted(_skus_set_tool)
+        sincronizar_contadores_con_odoo(st.session_state.odoo_skus)
 
     _reportar_subida_imagenes(subidas, errs_odoo)
 
@@ -3395,6 +3405,17 @@ if st.session_state.get("clasificacion_activa"):
                         _props, tipo_cambio,
                         st.session_state.get("costo_contenedor", 525000.0),
                     )
+                # Agregar los SKUs recién creados a odoo_skus para que futuras
+                # cargas en la misma sesión no generen números duplicados.
+                _nuevos_skus_cls = [
+                    p["sku"] for p in _props
+                    if p.get("sku") and p.get("accion") != "duplicado"
+                ]
+                if _nuevos_skus_cls:
+                    _skus_set = set(st.session_state.get("odoo_skus", []))
+                    _skus_set.update(_nuevos_skus_cls)
+                    st.session_state.odoo_skus = sorted(_skus_set)
+                    sincronizar_contadores_con_odoo(st.session_state.odoo_skus)
 
             # ── Generar reporte de clasificación (para bodega) ────────────────
             _nombre_pl = st.session_state.get("filename", "")

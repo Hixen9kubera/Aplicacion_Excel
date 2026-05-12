@@ -593,7 +593,15 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
         nombre_base = _phash_override.get(i) or str(clas.get("nombre_base") or nombre).strip()
         # Quitar sufijos #N que el parser añade a nombres duplicados (causarían grupos distintos)
         nombre_base = re.sub(r'\s*#\d+$', '', nombre_base).strip()
-        # Sincronizar nombre del producto con nombre_base (ya en español)
+        # Quitar color al final del nombre para que variantes del mismo producto se agrupen
+        # bajo el mismo padre aunque Haiku no haya quitado el color (ej. "Caja azul" y "Caja rosa")
+        _COLORES_TRAIL = (
+            r'\s+(negro|negra|blanco|blanca|gris|rojo|roja|azul|verde|amarillo|amarilla|'
+            r'rosa|naranja|morado|morada|café|beige|plateado|plateada|dorado|dorada|'
+            r'multicolor|lila|turquesa|celeste|crema|nude|camel|marino|oliva)\s*$'
+        )
+        nombre_base = re.sub(_COLORES_TRAIL, '', nombre_base, flags=re.IGNORECASE).strip()
+        # Sincronizar nombre del producto con nombre_base (ya en español, sin color)
         if nombre_base and nombre_base != nombre:
             prod["nombre"] = nombre_base
             nombre = nombre_base

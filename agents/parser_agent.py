@@ -87,6 +87,20 @@ Los encabezados pueden estar en cualquier idioma (chino, inglés, español, etc.
 Campos a identificar (índice base 0):
 nombre_producto, nombre_producto_alt, id_guia, cajas_master, piezas_x_caja, piezas_total, cbm_por_pieza, cbm_master_carton, cbm_total_sku, precio_usd, largo_cm, ancho_cm, alto_cm, peso_kg, volumen_por_pieza, material, uso
 
+Pistas de encabezados en CHINO para cada campo (además de inglés/español):
+- nombre_producto:   品名 / 货物品名 / 英文品名 / 产品名称 / 商品名称
+- nombre_producto_alt: 中文品名 / 品名（中文）
+- precio_usd:        单价 / 单价(USD) / 申报单价
+- piezas_total:      总个数 / 总产品数量 / 总数量 / 申报总件数
+- piezas_x_caja:     单箱数量 / 每箱数量 / 单箱产品申报数量 / pcs/ctn
+- cajas_master:      箱数 / 总箱数 / 件数
+- cbm_master_carton: 体积/箱 / 单箱体积 / 箱体积 / @cbm
+- cbm_total_sku:     总体积 / 总CBM
+- id_guia:           运单号 / 单号 / 快递单号
+- largo_cm:          长(cm) / 货箱长度
+- ancho_cm:          宽(cm) / 货箱宽度
+- alto_cm:           高(cm) / 货箱高度
+
 IMPORTANTE para columnas CBM — usa los valores numéricos de las filas de muestra para inferir correctamente:
 
 Definiciones:
@@ -333,6 +347,70 @@ def leer_productos(file_bytes: bytes, columnas: dict, fila_encabezado: int = 1) 
         productos = productos[: ultimo_completo + 1]
 
     return productos, advertencias
+
+
+def derivar_cbm_desde_dimensiones(productos: list[dict], advertencias: list[str]) -> list[dict]:
+    """
+    Cuando un producto no tiene ningún campo CBM pero sí tiene dimensiones (L×A×H),
+    calcula cbm_master_carton y, si hay piezas_x_caja, también cbm_por_pieza.
+    """
+    for prod in productos:
+        cbm_pz  = _safe_float(prod.get("cbm_por_pieza"))
+        cbm_mc  = _safe_float(prod.get("cbm_master_carton"))
+        cbm_tot = _safe_float(prod.get("cbm_total_sku"))
+        if cbm_pz > 0 or cbm_mc > 0 or cbm_tot > 0:
+            continue  # ya tiene algún valor, no tocar
+
+        largo = _safe_float(prod.get("largo_cm"))
+        ancho = _safe_float(prod.get("ancho_cm"))
+        alto  = _safe_float(prod.get("alto_cm"))
+        if largo <= 0 or ancho <= 0 or alto <= 0:
+            continue
+        if largo > 300 or ancho > 300 or alto > 300:
+            continue  # valores inverosímiles (sumados, fuera de rango)
+
+        cbm_caja = round(largo * ancho * alto / 1_000_000, 6)
+        prod["cbm_master_carton"] = cbm_caja
+
+        cajas = _safe_float(prod.get("cajas_master"))
+        if cajas > 0:
+            prod["cbm_total_sku"] = round(cbm_caja * cajas, 6)
+
+        pzs_caja = _safe_float(prod.get("piezas_x_caja"))
+        if pzs_caja > 0:
+            prod["cbm_por_pieza"] = round(cbm_caja / pzs_caja, 6)
+
+        advertencias.append(
+            f"CBM calculado desde dimensiones en '{prod.get('nombre', '?')}': "
+            f"{largo}×{ancho}×{alto} cm → {cbm_caja} m³/caja"
+        )
+    return productos
+
+
+def derivar_cbm_cruzado(productos: list[dict]) -> list[dict]:
+    """
+    Deriva valores CBM faltantes usando relaciones entre cbm_master_carton,
+    cbm_total_sku y cajas_master (cuando se conocen dos de los tres valores).
+    También deriva cbm_por_pieza desde cbm_master_carton / piezas_x_caja.
+    """
+    for prod in productos:
+        cbm_mc  = _safe_float(prod.get("cbm_master_carton"))
+        cbm_tot = _safe_float(prod.get("cbm_total_sku"))
+        cajas   = _safe_float(prod.get("cajas_master"))
+        pzs_cja = _safe_float(prod.get("piezas_x_caja"))
+        cbm_pz  = _safe_float(prod.get("cbm_por_pieza"))
+
+        if cbm_mc == 0 and cbm_tot > 0 and cajas > 0:
+            prod["cbm_master_carton"] = round(cbm_tot / cajas, 6)
+            cbm_mc = prod["cbm_master_carton"]
+
+        if cbm_tot == 0 and cbm_mc > 0 and cajas > 0:
+            prod["cbm_total_sku"] = round(cbm_mc * cajas, 6)
+
+        if cbm_pz == 0 and cbm_mc > 0 and pzs_cja > 0:
+            prod["cbm_por_pieza"] = round(cbm_mc / pzs_cja, 6)
+
+    return productos
 
 
 def corregir_cbm(productos: list[dict], advertencias: list[str]) -> list[dict]:
@@ -754,6 +832,8 @@ def agente_parser(
     advertencias: list[str] = []
     productos, advs = leer_productos(file_bytes, columnas, fila_encabezado=fila_enc)
     advertencias.extend(advs)
+    productos = derivar_cbm_cruzado(productos)
+    productos = derivar_cbm_desde_dimensiones(productos, advertencias)
     productos = corregir_cbm(productos, advertencias)
     productos = corregir_cbm_inner(productos, advertencias, file_bytes, columnas)
 

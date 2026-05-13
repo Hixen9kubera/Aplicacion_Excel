@@ -661,10 +661,13 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
 
         # ── Verificar que imagen es similar al padre registrado ───────────────
         # Si mismo nombre_base pero imágenes visualmente distintas → padre separado
+        # Solo se aplica el split cuando el padre vino de Odoo; variantes del mismo
+        # PL local nunca se separan aunque sean colores distintos (Fix: evitar OFI-0431 vs OFI-0432).
         if nombre_base in registro:
             _ph_actual = _phash_by_idx.get(i)
             _ph_padre  = registro[nombre_base].get("padre_phash")
-            if _ph_actual is not None and _ph_padre is not None:
+            _split_ok  = registro[nombre_base].get("padre_fuente_src") != "local"
+            if _split_ok and _ph_actual is not None and _ph_padre is not None:
                 if _ph_actual - _ph_padre > _UMBRAL_SPLIT:
                     # Imagen distinta al padre original — buscar si ya existe un split similar
                     _sfx_check = 1
@@ -689,15 +692,50 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                 "confianza_padre":   1.0,
             })
             if not att_cod:
-                # Sin atributo → duplicado del padre
-                prop["accion"]           = "duplicado"
-                prop["duplicado_de_idx"] = entrada.get("padre_idx")
-                prop["sku"]              = entrada["sku_padre"]
+                # Sin atributo: si la imagen es visualmente distinta al padre → auto-generar
+                # att_cod secuencial en lugar de marcar como duplicado (Fix: F33 beige).
+                _ph_curr_d = _phash_by_idx.get(i)
+                _ph_pad_d  = entrada.get("padre_phash")
+                _vis_diff_d = (_ph_curr_d is not None and _ph_pad_d is not None
+                               and _ph_curr_d - _ph_pad_d > _UMBRAL_SPLIT)
+                if _vis_diff_d:
+                    _est_taken = [k for k in entrada["variantes"]
+                                  if k == "EST" or (isinstance(k, str) and k.startswith("EST-"))]
+                    att_cod = f"EST-{len(_est_taken) + 1}" if _est_taken else "EST"
+                    prop["atributo_cod"]   = att_cod
+                    prop["atributo_tipo"]  = "Estándar"
+                    prop["atributo_valor"] = att_cod
+                    prop["accion"] = "crear_variante"
+                    sku_var = _sku_mismo_numero(entrada["subcod"], entrada["numero"], att_cod)
+                    prop["sku"]    = sku_var
+                    prop["padre_sku"] = entrada["sku_padre"]
+                    entrada["variantes"][att_cod] = {"sku": sku_var, "idx": i, "phash": _ph_curr_d}
+                else:
+                    prop["accion"]           = "duplicado"
+                    prop["duplicado_de_idx"] = entrada.get("padre_idx")
+                    prop["sku"]              = entrada["sku_padre"]
             elif att_cod in entrada["variantes"]:
-                # Misma variante ya existe en este packing list
-                prop["accion"]           = "duplicado"
-                prop["duplicado_de_idx"] = entrada["variantes"][att_cod]["idx"]
-                prop["sku"]              = entrada["variantes"][att_cod]["sku"]
+                # Misma variante ya existe — si imagen es distinta, renombrar att_cod
+                _ph_curr_v = _phash_by_idx.get(i)
+                _ph_var_v  = entrada["variantes"][att_cod].get("phash")
+                _vis_diff_v = (_ph_curr_v is not None and _ph_var_v is not None
+                               and _ph_curr_v - _ph_var_v > _UMBRAL_SPLIT)
+                if _vis_diff_v:
+                    _n_suf = 2
+                    _new_att = f"{att_cod}-{_n_suf}"
+                    while _new_att in entrada["variantes"]:
+                        _n_suf += 1
+                        _new_att = f"{att_cod}-{_n_suf}"
+                    att_cod = _new_att
+                    prop["atributo_cod"] = att_cod
+                    prop["accion"] = "crear_variante"
+                    sku_var = _sku_mismo_numero(entrada["subcod"], entrada["numero"], att_cod)
+                    prop["sku"] = sku_var
+                    entrada["variantes"][att_cod] = {"sku": sku_var, "idx": i, "phash": _ph_curr_v}
+                else:
+                    prop["accion"]           = "duplicado"
+                    prop["duplicado_de_idx"] = entrada["variantes"][att_cod]["idx"]
+                    prop["sku"]              = entrada["variantes"][att_cod]["sku"]
             else:
                 # Nueva variante del mismo padre — el número es fijo (hereda del padre)
                 prop["accion"] = "crear_variante"
@@ -705,7 +743,7 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                 # NO llamar validar_sku_vs_odoo: el número lo hereda del padre y no
                 # debe ajustarse aunque haya SKUs con número mayor en Odoo.
                 prop["sku"] = sku_var
-                entrada["variantes"][att_cod] = {"sku": sku_var, "idx": i}
+                entrada["variantes"][att_cod] = {"sku": sku_var, "idx": i, "phash": _phash_by_idx.get(i)}
         else:
             # ── Buscar en Odoo ─────────────────────────────────────────────
             candidato = None
@@ -752,7 +790,8 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                     "odoo_id": prod_odoo.get("id"), "odoo_nombre": prod_odoo.get("name", ""),
                     "padre_idx": i,
                     "padre_phash": _phash_by_idx.get(i),
-                    "variantes": {att_cod: {"sku": prop["sku"], "idx": i}} if att_cod else {},
+                    "padre_fuente_src": "odoo",
+                    "variantes": {att_cod: {"sku": prop["sku"], "idx": i, "phash": _phash_by_idx.get(i)}} if att_cod else {},
                 }
             else:
                 # ── Crear padre nuevo ──────────────────────────────────────
@@ -792,7 +831,8 @@ def analizar_clasificacion_packing(file_bytes: bytes, productos: list[dict], mod
                     "odoo_id": None, "odoo_nombre": "",
                     "padre_idx": i,
                     "padre_phash": _phash_by_idx.get(i),
-                    "variantes": {att_cod: {"sku": prop["sku"], "idx": i}} if att_cod else {},
+                    "padre_fuente_src": "local",
+                    "variantes": {att_cod: {"sku": prop["sku"], "idx": i, "phash": _phash_by_idx.get(i)}} if att_cod else {},
                 }
 
         prop["accion_display"] = ACCION_LABELS.get(prop["accion"], prop["accion"])

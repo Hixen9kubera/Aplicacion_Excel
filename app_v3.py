@@ -1237,6 +1237,17 @@ def generar_excel_tool(productos: List[dict] | None = None) -> str:
     if not prods:
         return "Error: no hay productos cargados en sesión."
 
+    # Recargar odoo_skus desde Odoo antes de subir para evitar duplicados
+    # si productos fueron borrados/archivados externamente entre sesiones
+    if st.session_state.get("odoo_conectado"):
+        _skus_fresh, _err_fresh = cargar_skus_odoo(
+            os.environ.get("ODOO_URL", ""), os.environ.get("ODOO_DB", ""),
+            os.environ.get("ODOO_USER", ""), os.environ.get("ODOO_PASSWORD", ""),
+        )
+        if not _err_fresh and _skus_fresh:
+            st.session_state.odoo_skus = _skus_fresh
+            sincronizar_contadores_con_odoo(_skus_fresh)
+
     # costo_por_m3 se calcula una vez y lo usan tanto el master Excel como ODOO
     cbm_total    = sum(_cbm_total_fila(p) for p in prods)
     costo_por_m3 = costo_contenedor / cbm_total if cbm_total > 0 else 0.0
@@ -3408,6 +3419,14 @@ if st.session_state.get("clasificacion_activa"):
             _res_odoo: list[str] = []
             _err_odoo: list[str] = []
             if _odoo_ok:
+                # Recargar odoo_skus frescos antes de crear para evitar duplicados
+                _skus_fresh2, _err_f2 = cargar_skus_odoo(
+                    os.environ.get("ODOO_URL", ""), os.environ.get("ODOO_DB", ""),
+                    os.environ.get("ODOO_USER", ""), os.environ.get("ODOO_PASSWORD", ""),
+                )
+                if not _err_f2 and _skus_fresh2:
+                    st.session_state.odoo_skus = _skus_fresh2
+                    sincronizar_contadores_con_odoo(_skus_fresh2)
                 with st.spinner("Creando productos en Odoo..."):
                     _res_odoo, _err_odoo = crear_clasificacion_en_odoo(
                         _props, tipo_cambio,

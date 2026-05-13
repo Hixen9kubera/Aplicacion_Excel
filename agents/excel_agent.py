@@ -402,6 +402,9 @@ def generar_excel_master(productos: list[dict], tipo_cambio: float,
 
     ws.freeze_panes = f"A{DATA_START}"
 
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)

@@ -3329,7 +3329,7 @@ if st.session_state.get("clasificacion_activa"):
                 except Exception as _ex:
                     st.warning(f"Excel FERRAFORME: {_ex}")
                 try:
-                    st.session_state.excel_master_bytes = generar_excel_master(_productos_c, _tc_e, _cc_e)
+                    st.session_state.excel_master_bytes = generar_excel_master(_productos_c, _tc_e, _cc_e, _fn_base)
                 except Exception as _ex:
                     st.warning(f"Excel Master: {_ex}")
                 try:

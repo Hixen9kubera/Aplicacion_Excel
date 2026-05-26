@@ -3278,7 +3278,7 @@ if st.session_state.get("clasificacion_activa"):
             # ── Checkbox requiere revisión ────────────────────────────────────
             with _c_rev:
                 st.checkbox(
-                    "",
+                    "Requiere revisión",
                     value=_prop.get("requiere_revision", False),
                     key=f"_cls_rev_{_i}",
                     label_visibility="collapsed",
